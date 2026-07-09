@@ -1,0 +1,32 @@
+FROM mcr.microsoft.com/playwright:v1.54.0-noble
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    DISPLAY=:99 \
+    DISPLAY_WIDTH=1440 \
+    DISPLAY_HEIGHT=900 \
+    START_URL=https://grok.com/
+
+ARG APT_MIRROR=
+
+RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+      sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://security.ubuntu.com/ubuntu|${APT_MIRROR}|g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      fluxbox \
+      fonts-noto-cjk \
+      novnc \
+      socat \
+      websockify \
+      x11vnc \
+      xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/browser-entrypoint.sh \
+    && chmod +x /usr/local/bin/browser-entrypoint.sh
+
+VOLUME ["/config"]
+EXPOSE 5800 9222
+
+CMD ["/usr/local/bin/browser-entrypoint.sh"]

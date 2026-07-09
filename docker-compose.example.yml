@@ -1,0 +1,33 @@
+services:
+  grok2api:
+    build: .
+    container_name: grok2api
+    restart: unless-stopped
+    environment:
+      GROK2API_HOST: 0.0.0.0
+      GROK2API_PORT: 18024
+      GROK2API_ADMIN_KEY: change-me-admin-key
+      GROK2API_API_KEY: change-me-api-key
+      GROK2API_DATA_DIR: /app/data
+      GROK2API_HOST_DATA_DIR: ${PWD}/data
+      GROK2API_BROWSER_BASE_URL: http://127.0.0.1:18200
+      GROK2API_BROWSER_MODE: docker-novnc
+      GROK2API_BROWSER_IMAGE: grok2api-browser:latest
+      GROK2API_BROWSER_PORT_BASE: 18200
+      GROK2API_BROWSER_DEBUG_PORT_BASE: 19200
+      GROK2API_DOCKER_HOST_GATEWAY: host.docker.internal
+      GROK2API_CAPTURE_TRACES: "true"
+      GROK2API_ACCESS_LOG: "false"
+    ports:
+      - "18024:18024"
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  browser-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    image: grok2api-browser:latest
