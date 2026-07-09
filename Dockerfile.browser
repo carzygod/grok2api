@@ -20,7 +20,17 @@ RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list.d/ubuntu.sources ]; th
       websockify \
       x11vnc \
       xvfb \
+    && if apt-cache show chromium-sandbox >/dev/null 2>&1; then \
+      apt-get install -y --no-install-recommends chromium-sandbox; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
+
+RUN if [ -d /ms-playwright ]; then \
+      find /ms-playwright -type f -name chrome_sandbox -exec chown root:root {} \; -exec chmod 4755 {} \; ; \
+    fi \
+    && if [ -d /usr/lib/chromium ]; then \
+      find /usr/lib/chromium -type f \( -name chrome-sandbox -o -name chromium-sandbox \) -exec chown root:root {} \; -exec chmod 4755 {} \; ; \
+    fi
 
 COPY scripts/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/browser-entrypoint.sh \

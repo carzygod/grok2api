@@ -5,6 +5,17 @@ mkdir -p /config /tmp/grok2api-browser
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 rm -f /config/SingletonCookie /config/SingletonLock /config/SingletonSocket
 
+CHROME_USER="${CHROME_USER:-pwuser}"
+if ! id "$CHROME_USER" >/dev/null 2>&1; then
+  CHROME_USER=chrome
+  if ! id "$CHROME_USER" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash "$CHROME_USER" >/dev/null 2>&1 || CHROME_USER=""
+  fi
+fi
+if [ -n "$CHROME_USER" ] && id "$CHROME_USER" >/dev/null 2>&1; then
+  chown -R "$CHROME_USER:$CHROME_USER" /config /tmp/grok2api-browser
+fi
+
 export DISPLAY="${DISPLAY:-:99}"
 DISPLAY_WIDTH="${DISPLAY_WIDTH:-1440}"
 DISPLAY_HEIGHT="${DISPLAY_HEIGHT:-900}"
@@ -16,7 +27,18 @@ if [ -z "$CHROME_BIN" ]; then
   CHROME_BIN="$(find /ms-playwright -path "*/chrome-linux/chrome" -type f 2>/dev/null | sort | tail -n 1 || true)"
 fi
 if [ -z "$CHROME_BIN" ]; then
-  CHROME_BIN="$(command -v chromium || command -v google-chrome || command -v chrome || true)"
+  for candidate in \
+    /opt/google/chrome/chrome \
+    /usr/lib/chromium/chromium \
+    /usr/bin/google-chrome-stable \
+    /usr/bin/google-chrome \
+    /usr/bin/chrome \
+    /usr/bin/chromium; do
+    if [ -x "$candidate" ]; then
+      CHROME_BIN="$candidate"
+      break
+    fi
+  done
 fi
 if [ -z "$CHROME_BIN" ]; then
   echo "No Chromium/Chrome binary found." >&2
@@ -52,21 +74,20 @@ cleanup() {
 }
 trap cleanup EXIT TERM INT
 
-"$CHROME_BIN" \
-  --no-sandbox \
-  --disable-dev-shm-usage \
-  --disable-gpu \
-  --disable-breakpad \
-  --no-first-run \
-  --no-default-browser-check \
-  --password-store=basic \
-  --use-mock-keychain \
-  --user-data-dir=/config \
-  --remote-debugging-address=127.0.0.1 \
-  --remote-debugging-port="${CHROME_DEBUG_PORT_INTERNAL}" \
-  --remote-allow-origins="*" \
-  --window-size="${DISPLAY_WIDTH},${DISPLAY_HEIGHT}" \
-  "$START_URL" >/tmp/grok2api-browser/chromium.log 2>&1 &
+CHROME_ARGS=(
+  --user-data-dir=/config
+  --remote-debugging-address=127.0.0.1
+  --remote-debugging-port="${CHROME_DEBUG_PORT_INTERNAL}"
+  "$START_URL"
+)
+
+if [ -n "$CHROME_USER" ] && id "$CHROME_USER" >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+  runuser -u "$CHROME_USER" -- "$CHROME_BIN" "${CHROME_ARGS[@]}" >/tmp/grok2api-browser/chromium.log 2>&1 &
+elif [ -n "$CHROME_USER" ] && id "$CHROME_USER" >/dev/null 2>&1 && command -v su >/dev/null 2>&1; then
+  su -s /bin/bash "$CHROME_USER" -c "$(printf '%q ' "$CHROME_BIN" "${CHROME_ARGS[@]}")" >/tmp/grok2api-browser/chromium.log 2>&1 &
+else
+  "$CHROME_BIN" "${CHROME_ARGS[@]}" >/tmp/grok2api-browser/chromium.log 2>&1 &
+fi
 CHROME_PID=$!
 
 wait "$CHROME_PID"

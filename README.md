@@ -184,11 +184,26 @@ The browser image exposes:
 
 Modern Chromium may bind DevTools to loopback even when asked to bind `0.0.0.0`. The browser image therefore runs Chrome DevTools on an internal loopback port and publishes a `socat` proxy on container port `9222` so Docker port publishing works.
 
+Chrome is started as a non-root browser account (`pwuser`, or `chrome` when the
+base image does not provide `pwuser`) with the Chromium sandbox enabled. The
+entrypoint prefers the real browser binary, such as `/opt/google/chrome/chrome`
+or `/usr/lib/chromium/chromium`, before falling back to package wrapper scripts.
+The browser entrypoint intentionally avoids container/automation hardening flags such as
+`--no-sandbox`, `--disable-dev-shm-usage`, `--disable-gpu`, `--disable-breakpad`,
+`--no-first-run`, `--no-default-browser-check`, `--password-store`, and
+`--use-mock-keychain`. The only launch switches kept are the persistent profile directory
+and the local Chrome DevTools endpoint required for account automation.
+Browser containers are created with `--shm-size=1g` and
+`--security-opt seccomp=unconfined` so the sandbox can create the namespaces it
+expects without disabling the sandbox in Chrome.
+
 Manual run example:
 
 ```bash
 docker run -d --name grok2api-browser-default \
   --restart unless-stopped \
+  --shm-size=1g \
+  --security-opt seccomp=unconfined \
   -p 18200:5800 \
   -p 19200:9222 \
   -e DISPLAY_WIDTH=1440 \

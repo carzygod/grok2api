@@ -38,6 +38,14 @@ docker run -d --name grok2api \
   grok2api:latest
 ```
 
+Account browser containers are started with a larger shared-memory segment and
+`seccomp=unconfined` so Chromium's sandbox can create its namespaces. Chrome runs
+as a non-root browser account (`pwuser`, or `chrome` as a fallback) with the
+Chromium sandbox enabled. The browser entrypoint prefers the real browser binary
+instead of package wrapper scripts and avoids `--no-sandbox` and unrelated
+`--disable-*` switches; only the persistent profile path and local CDP endpoint
+are configured explicitly.
+
 ## 3. Add Account
 
 Open Admin:

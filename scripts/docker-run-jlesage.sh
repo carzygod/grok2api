@@ -10,6 +10,8 @@ mkdir -p "${DATA_DIR}/profiles/${PROFILE}"
 
 docker run -d --name "grok2api-browser-${PROFILE}" \
   --restart unless-stopped \
+  --shm-size=1g \
+  --security-opt seccomp=unconfined \
   -p "${PORT}:5800" \
   -p "$((PORT + 1000)):9222" \
   -e DISPLAY_WIDTH=1440 \

@@ -192,6 +192,8 @@ class BrowserKernel:
                         "5800/tcp": account.browser_port,
                         "9222/tcp": account.browser_debug_port,
                     },
+                    security_opt=["seccomp=unconfined"],
+                    shm_size="1g",
                 )
         except RuntimeError:
             raise
