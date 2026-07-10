@@ -484,7 +484,7 @@ class BrowserKernel:
                             size=body.size,
                             images=body.image,
                         ),
-                        timeout=260,
+                        timeout=380,
                     )
                     await self._writeback_cookies(account.id, adapter)
             result = {"data": data}

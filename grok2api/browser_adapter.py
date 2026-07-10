@@ -233,7 +233,7 @@ class GrokBrowserAdapter:
         n: int = 1,
         size: str | None = None,
         images: str | list[str] | None = None,
-        timeout_s: int = 180,
+        timeout_s: int = 300,
     ) -> list[dict[str, str]]:
         if not prompt:
             raise BrowserAdapterError("empty_prompt", "Image prompt is required.", status_code=400)
@@ -562,6 +562,7 @@ class GrokBrowserAdapter:
                 prompt,
             )
 
+        await self._settle(0.8)
         clicked = await self._click_send_button()
         if not clicked:
             await target.press("Enter")
@@ -651,24 +652,28 @@ class GrokBrowserAdapter:
 
     async def _click_send_button(self) -> bool:
         selectors = (
+            "button[type='submit']",
             "button[aria-label*='Send' i]",
             "button[aria-label*='Submit' i]",
             "button:has-text('Send')",
             "button:has-text('Submit')",
         )
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector)
-                count = await loc.count()
-                for index in range(count - 1, -1, -1):
-                    button = loc.nth(index)
-                    if not await button.is_visible(timeout=500):
-                        continue
-                    if await button.is_enabled(timeout=1_000):
-                        await button.click(timeout=5_000)
-                        return True
-            except Exception:
-                continue
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            for selector in selectors:
+                try:
+                    loc = self.page.locator(selector)
+                    count = await loc.count()
+                    for index in range(count - 1, -1, -1):
+                        button = loc.nth(index)
+                        if not await button.is_visible(timeout=500):
+                            continue
+                        if await button.is_enabled(timeout=500):
+                            await button.click(timeout=5_000)
+                            return True
+                except Exception:
+                    continue
+            await self._settle(0.5)
         return False
 
     async def _wait_for_text_delta(self, before: str, prompt: str, *, timeout_s: int) -> str:
