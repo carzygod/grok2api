@@ -45,6 +45,15 @@ Chromium sandbox enabled. The browser entrypoint prefers the real browser binary
 instead of package wrapper scripts and avoids `--no-sandbox` and unrelated
 `--disable-*` switches; only the persistent profile path and local CDP endpoint
 are configured explicitly.
+The browser image includes Mesa/GLX and DBus packages so desktop browser APIs
+have the required runtime dependencies. On CPU-only Xvfb hosts, Chrome may still
+blocklist llvmpipe WebGL; use a real GPU desktop host when WebGL identity must
+match a normal consumer Chrome session. Set `GROK2API_BROWSER_TIMEZONE` to the
+account's normal region; HZ01 uses `Asia/Taipei`.
+If `https://accounts.x.ai/check-login` returns `Blocked due to abusive traffic
+patterns` even before login, use `GROK2API_BROWSER_PROXY_SERVER` to route only
+the account browser through a clean HTTP or SOCKS egress. This changes the
+browser's outbound network path without changing the API service URL.
 
 ## 3. Add Account
 

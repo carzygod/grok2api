@@ -13,8 +13,17 @@ RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list.d/ubuntu.sources ]; th
     fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+      dbus \
+      dbus-x11 \
       fluxbox \
       fonts-noto-cjk \
+      libegl1 \
+      libgbm1 \
+      libgl1 \
+      libgl1-mesa-dri \
+      libgles2 \
+      libglx-mesa0 \
+      mesa-utils \
       novnc \
       socat \
       websockify \

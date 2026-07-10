@@ -172,19 +172,25 @@ class BrowserKernel:
                 if container.status != "running":
                     container.start()
             except NotFound:
+                environment = {
+                    "VNC_PASSWORD": account.browser_password,
+                    "DISPLAY_WIDTH": "1440",
+                    "DISPLAY_HEIGHT": "900",
+                    "START_URL": "https://grok.com/",
+                    "CHROME_DEBUG_PORT": "9222",
+                    "CHROME_DEBUG_PORT_INTERNAL": "9223",
+                    "TZ": settings.browser_timezone,
+                }
+                if settings.browser_proxy_server:
+                    environment["CHROME_PROXY_SERVER"] = settings.browser_proxy_server
+                if settings.browser_proxy_bypass_list:
+                    environment["CHROME_PROXY_BYPASS_LIST"] = settings.browser_proxy_bypass_list
                 client.containers.run(
                     settings.browser_image,
                     detach=True,
                     name=account.browser_container,
                     restart_policy={"Name": "unless-stopped"},
-                    environment={
-                        "VNC_PASSWORD": account.browser_password,
-                        "DISPLAY_WIDTH": "1440",
-                        "DISPLAY_HEIGHT": "900",
-                        "START_URL": "https://grok.com/",
-                        "CHROME_DEBUG_PORT": "9222",
-                        "CHROME_DEBUG_PORT_INTERNAL": "9223",
-                    },
+                    environment=environment,
                     volumes={
                         str(host_profile): {"bind": "/config", "mode": "rw"},
                     },

@@ -196,6 +196,17 @@ and the local Chrome DevTools endpoint required for account automation.
 Browser containers are created with `--shm-size=1g` and
 `--security-opt seccomp=unconfined` so the sandbox can create the namespaces it
 expects without disabling the sandbox in Chrome.
+The image also includes Mesa/GLX and DBus components so common desktop browser
+APIs have the required runtime dependencies. On CPU-only Xvfb hosts, Chrome may
+still blocklist llvmpipe WebGL; use a real GPU desktop host when WebGL identity
+must match a normal consumer Chrome session.
+Set `GROK2API_BROWSER_TIMEZONE` to align the browser timezone with the account's
+normal region; it defaults to `Asia/Taipei` for the HZ01 deployment.
+If xAI/Cloudflare blocks the server's outbound IP with `Blocked due to abusive
+traffic patterns`, configure a clean browser-only egress with
+`GROK2API_BROWSER_PROXY_SERVER`, for example `http://host:port` or
+`socks5://host:port`. Optional `GROK2API_BROWSER_PROXY_BYPASS_LIST` is passed to
+Chrome's proxy bypass list.
 
 Manual run example:
 
@@ -208,6 +219,8 @@ docker run -d --name grok2api-browser-default \
   -p 19200:9222 \
   -e DISPLAY_WIDTH=1440 \
   -e DISPLAY_HEIGHT=900 \
+  -e TZ='Asia/Taipei' \
+  -e CHROME_PROXY_SERVER='socks5://proxy.example:1080' \
   -e VNC_PASSWORD='change-me-vnc-password' \
   -e START_URL='https://grok.com/' \
   -v ./data/profiles/default:/config \

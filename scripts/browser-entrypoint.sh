@@ -17,6 +17,7 @@ if [ -n "$CHROME_USER" ] && id "$CHROME_USER" >/dev/null 2>&1; then
 fi
 
 export DISPLAY="${DISPLAY:-:99}"
+export TZ="${TZ:-Asia/Taipei}"
 DISPLAY_WIDTH="${DISPLAY_WIDTH:-1440}"
 DISPLAY_HEIGHT="${DISPLAY_HEIGHT:-900}"
 START_URL="${START_URL:-https://grok.com/}"
@@ -45,7 +46,17 @@ if [ -z "$CHROME_BIN" ]; then
   exit 1
 fi
 
-Xvfb "$DISPLAY" -screen 0 "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}x24" -ac +extension RANDR &
+if command -v dbus-daemon >/dev/null 2>&1; then
+  mkdir -p /run/dbus
+  dbus-daemon --system --fork >/tmp/grok2api-browser/dbus-system.log 2>&1 || true
+  DBUS_INFO="$(dbus-daemon --session --fork --print-address --print-pid 2>/tmp/grok2api-browser/dbus-session.log || true)"
+  if [ -n "$DBUS_INFO" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="$(printf '%s\n' "$DBUS_INFO" | sed -n '1p')"
+    DBUS_PID="$(printf '%s\n' "$DBUS_INFO" | sed -n '2p')"
+  fi
+fi
+
+Xvfb "$DISPLAY" -screen 0 "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}x24" -ac -noreset +extension RANDR +extension GLX +extension RENDER &
 XVFB_PID=$!
 
 sleep 1
@@ -69,7 +80,7 @@ socat "TCP-LISTEN:${CHROME_DEBUG_PORT},fork,reuseaddr,bind=0.0.0.0" "TCP:127.0.0
 CDP_PROXY_PID=$!
 
 cleanup() {
-  kill "${CHROME_PID:-}" "${CDP_PROXY_PID:-}" "${NOVNC_PID:-}" "${XVNC_PID:-}" "${FLUXBOX_PID:-}" "$XVFB_PID" 2>/dev/null || true
+  kill "${CHROME_PID:-}" "${CDP_PROXY_PID:-}" "${NOVNC_PID:-}" "${XVNC_PID:-}" "${FLUXBOX_PID:-}" "${DBUS_PID:-}" "$XVFB_PID" 2>/dev/null || true
   rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 }
 trap cleanup EXIT TERM INT
@@ -80,6 +91,12 @@ CHROME_ARGS=(
   --remote-debugging-port="${CHROME_DEBUG_PORT_INTERNAL}"
   "$START_URL"
 )
+if [ -n "${CHROME_PROXY_SERVER:-}" ]; then
+  CHROME_ARGS+=(--proxy-server="${CHROME_PROXY_SERVER}")
+fi
+if [ -n "${CHROME_PROXY_BYPASS_LIST:-}" ]; then
+  CHROME_ARGS+=(--proxy-bypass-list="${CHROME_PROXY_BYPASS_LIST}")
+fi
 
 if [ -n "$CHROME_USER" ] && id "$CHROME_USER" >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
   runuser -u "$CHROME_USER" -- "$CHROME_BIN" "${CHROME_ARGS[@]}" >/tmp/grok2api-browser/chromium.log 2>&1 &
