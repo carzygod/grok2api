@@ -13,13 +13,14 @@ RUN apt-get update \
 ARG PIP_INDEX_URL=
 
 COPY requirements.txt pyproject.toml README.md ./
-COPY grok2api ./grok2api
 
 RUN if [ -n "$PIP_INDEX_URL" ]; then \
       pip install --no-cache-dir -i "$PIP_INDEX_URL" -r requirements.txt; \
     else \
       pip install --no-cache-dir -r requirements.txt; \
     fi
+
+COPY grok2api ./grok2api
 
 VOLUME ["/app/data"]
 EXPOSE 18024
