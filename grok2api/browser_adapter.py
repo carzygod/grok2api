@@ -482,13 +482,7 @@ class GrokBrowserAdapter:
         return any(marker in text for marker in markers)
 
     async def _input_ready(self) -> bool:
-        for selector in self._prompt_selectors():
-            try:
-                if await self.page.locator(selector).count() > 0:
-                    return True
-            except Exception:
-                continue
-        return False
+        return await self._prompt_input() is not None
 
     async def _require_logged_in(self) -> None:
         if await self._login_detected():
@@ -508,22 +502,40 @@ class GrokBrowserAdapter:
     @staticmethod
     def _prompt_selectors() -> tuple[str, ...]:
         return (
-            "textarea",
-            "div[contenteditable='true']",
-            "[role='textbox']",
+            "[aria-label*='Ask Grok' i]",
             "[aria-label*='prompt' i]",
             "[aria-label*='message' i]",
+            "[role='textbox']",
+            "div[contenteditable='true']",
+            "textarea",
         )
 
-    async def _submit_prompt(self, prompt: str) -> None:
-        target = None
+    async def _prompt_input(self):
+        fallback = None
         for selector in self._prompt_selectors():
             try:
-                if await self.page.locator(selector).count() > 0:
-                    target = self.page.locator(selector).last
-                    break
+                locator = self.page.locator(selector)
+                count = await locator.count()
+                for index in range(count - 1, -1, -1):
+                    target = locator.nth(index)
+                    try:
+                        if not await target.is_visible(timeout=500):
+                            continue
+                        box = await target.bounding_box(timeout=500)
+                        if not box or box.get("width", 0) < 80 or box.get("height", 0) < 20:
+                            continue
+                        if await target.is_editable(timeout=500):
+                            return target
+                        if fallback is None:
+                            fallback = target
+                    except Exception:
+                        continue
             except Exception:
                 continue
+        return fallback
+
+    async def _submit_prompt(self, prompt: str) -> None:
+        target = await self._prompt_input()
         if target is None:
             raise BrowserAdapterError("prompt_input_not_found", "Prompt input was not found.")
 
@@ -647,6 +659,8 @@ class GrokBrowserAdapter:
                 count = await loc.count()
                 for index in range(count - 1, -1, -1):
                     button = loc.nth(index)
+                    if not await button.is_visible(timeout=500):
+                        continue
                     if await button.is_enabled(timeout=1_000):
                         await button.click(timeout=5_000)
                         return True
