@@ -549,8 +549,9 @@ class BrowserKernel:
                             aspect_ratio=body.aspect_ratio,
                             size=body.size,
                             images=body.image,
+                            timeout_s=720,
                         ),
-                        timeout=420,
+                        timeout=900,
                     )
                     await self._writeback_cookies(account.id, adapter)
             self.store.update_task(task.task_id, status="completed", result=result)

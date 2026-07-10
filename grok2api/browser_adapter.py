@@ -316,7 +316,8 @@ class GrokBrowserAdapter:
             if material.get("b64_json"):
                 out.append(material)
             elif url and not url.startswith("blob:"):
-                fallback_urls.append({"url": url})
+                if "assets.grok.com" not in url.lower():
+                    fallback_urls.append({"url": url})
         if not out:
             downloaded = await self._download_video_result()
             if downloaded.get("b64_json"):
@@ -380,7 +381,8 @@ class GrokBrowserAdapter:
             if material.get("b64_json"):
                 out.append(material)
             elif url and not url.startswith("blob:"):
-                fallback_urls.append({"url": url})
+                if "assets.grok.com" not in url.lower():
+                    fallback_urls.append({"url": url})
         if not out:
             downloaded = await self._download_video_result()
             if downloaded.get("b64_json"):
@@ -486,6 +488,11 @@ class GrokBrowserAdapter:
         if await self._prompt_input() is not None:
             return False
         text = (await self._body_text()).lower()
+        if (
+            "type to imagine" in text
+            or ("grok imagine" in text and "new generation" in text and "projects" in text)
+        ):
+            return False
         markers = (
             "log in",
             "sign in",
@@ -754,7 +761,9 @@ class GrokBrowserAdapter:
         lines = [
             line
             for line in lines
-            if line.lower() not in noisy and not line.lower().startswith("thought for ")
+            if line.lower() not in noisy
+            and not line.lower().startswith("thought for ")
+            and not line.lower().startswith(("learn about ", "explore ", "make the "))
         ]
         return "\n".join(lines)[-8000:]
 
@@ -897,25 +906,29 @@ class GrokBrowserAdapter:
                     item
                     for item in rows
                     if "assets.grok.com" in item.get("url", "").lower()
-                    and "/content" in item.get("url", "").lower()
                     and int(item.get("width") or 0) >= 512
                     and int(item.get("height") or 0) >= 512
+                    and int(item.get("displayWidth") or 0) >= 256
+                    and int(item.get("displayHeight") or 0) >= 256
                 ]
                 if asset_rows:
                     return asset_rows
-                preferred = [
+                data_rows = [
                     item
                     for item in rows
-                    if (
-                        item.get("url", "").startswith("data:image/")
-                        or "generated" in str(item.get("alt", "")).lower()
-                    )
+                    if item.get("url", "").startswith("data:image/")
+                    and "generated" in str(item.get("alt", "")).lower()
                     and int(item.get("width") or 0) >= 512
                     and int(item.get("height") or 0) >= 512
+                    and int(item.get("displayWidth") or 0) >= 256
+                    and int(item.get("displayHeight") or 0) >= 256
+                    and int(item.get("byteLength") or 0) >= 80 * 1024
                 ]
-                if first_seen_at and time.monotonic() - first_seen_at >= 45:
-                    return preferred or rows
-        return best_rows
+                if data_rows:
+                    return data_rows
+                if first_seen_at and time.monotonic() - first_seen_at >= 120:
+                    return []
+        return []
 
     async def _url_to_b64(self, url: str, *, default_media_type: str) -> dict[str, str]:
         if not url:
@@ -1008,6 +1021,7 @@ class GrokBrowserAdapter:
                 item.get("url", "")
                 for item in await self._media_sources("video")
                 if item.get("url") and item.get("url") not in seen
+                and int(item.get("readyState") or 0) >= 2
             ]
             if rows:
                 return rows
@@ -1021,7 +1035,12 @@ class GrokBrowserAdapter:
                     if (!url || typeof url !== 'string') return;
                     const clean = url.trim();
                     if (!clean || clean.startsWith('chrome-extension:')) return;
-                    out.push({url: clean, ...meta});
+                    let byteLength = 0;
+                    if (clean.startsWith('data:')) {
+                        const comma = clean.indexOf(',');
+                        if (comma >= 0) byteLength = Math.floor((clean.length - comma - 1) * 3 / 4);
+                    }
+                    out.push({url: clean, byteLength, ...meta});
                 };
                 const largestFromSrcset = (srcset) => {
                     if (!srcset) return '';
@@ -1033,10 +1052,13 @@ class GrokBrowserAdapter:
                     for (const img of Array.from(document.images)) {
                         const width = img.naturalWidth || img.width || 0;
                         const height = img.naturalHeight || img.height || 0;
+                        const rect = img.getBoundingClientRect();
                         if (width && height && (width < 96 || height < 96)) continue;
                         push(img.currentSrc || img.src || largestFromSrcset(img.srcset), {
                             width,
                             height,
+                            displayWidth: rect.width || 0,
+                            displayHeight: rect.height || 0,
                             kind: 'image',
                             alt: img.alt || '',
                             className: String(img.className || '')
@@ -1056,10 +1078,11 @@ class GrokBrowserAdapter:
                     push(video.currentSrc || video.src, {
                         width: video.videoWidth || video.clientWidth || 0,
                         height: video.videoHeight || video.clientHeight || 0,
+                        readyState: video.readyState || 0,
                         kind: 'video'
                     });
                     for (const source of Array.from(video.querySelectorAll('source'))) {
-                        push(source.src, {kind: 'video'});
+                        push(source.src, {kind: 'video', readyState: video.readyState || 0});
                     }
                 }
                 for (const source of Array.from(document.querySelectorAll('source[src]'))) {
