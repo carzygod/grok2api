@@ -58,6 +58,10 @@ temp/
 *.mp4
 *.webm
 
+# README demo media.
+!docs/demo/cute-cat-grok-image.jpg
+!docs/demo/cute-cat-grok-video.mp4
+
 .codex/
 .vscode/
 .idea/
