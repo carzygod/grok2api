@@ -310,15 +310,19 @@ class GrokBrowserAdapter:
                 "No generated video was found in the Grok page before timeout.",
             )
         out = []
-        downloaded = await self._download_video_result()
-        if downloaded.get("b64_json"):
-            out.append(downloaded)
+        fallback_urls = []
         for url in videos:
             material = await self._url_to_b64(url, default_media_type="video/mp4")
             if material.get("b64_json"):
                 out.append(material)
             elif url and not url.startswith("blob:"):
-                out.append({"url": url})
+                fallback_urls.append({"url": url})
+        if not out:
+            downloaded = await self._download_video_result()
+            if downloaded.get("b64_json"):
+                out.append(downloaded)
+        if not out:
+            out = fallback_urls
         if not out:
             raise BrowserAdapterError(
                 "media_fetch_failed",
@@ -370,15 +374,19 @@ class GrokBrowserAdapter:
                 "No generated video was found in the Grok page before timeout.",
             )
         out = []
-        downloaded = await self._download_video_result()
-        if downloaded.get("b64_json"):
-            out.append(downloaded)
+        fallback_urls = []
         for url in videos:
             material = await self._url_to_b64(url, default_media_type="video/mp4")
             if material.get("b64_json"):
                 out.append(material)
             elif url and not url.startswith("blob:"):
-                out.append({"url": url})
+                fallback_urls.append({"url": url})
+        if not out:
+            downloaded = await self._download_video_result()
+            if downloaded.get("b64_json"):
+                out.append(downloaded)
+        if not out:
+            out = fallback_urls
         if not out:
             raise BrowserAdapterError(
                 "media_fetch_failed",
