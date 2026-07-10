@@ -571,6 +571,9 @@ class GrokBrowserAdapter:
             return False
         button_selectors = (
             "button[aria-label*='Attach' i]",
+            "button:has-text('Upload a file')",
+            "[role='menuitem']:has-text('Upload a file')",
+            "[role='menuitem']:has-text('Upload')",
             "button[aria-label*='Upload' i]",
             "button[aria-label*='Add files' i]",
             "button[aria-label*='Add image' i]",
@@ -700,6 +703,8 @@ class GrokBrowserAdapter:
             text = text[len(before) :]
         elif prompt and prompt in text:
             text = text.rsplit(prompt, 1)[-1]
+        else:
+            return ""
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         noisy = {
             "grok",
