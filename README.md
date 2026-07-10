@@ -207,6 +207,14 @@ traffic patterns`, configure a clean browser-only egress with
 `GROK2API_BROWSER_PROXY_SERVER`, for example `http://host:port` or
 `socks5://host:port`. Optional `GROK2API_BROWSER_PROXY_BYPASS_LIST` is passed to
 Chrome's proxy bypass list.
+On HZ01, the verified working egress is Cloudflare WARP in local SOCKS proxy
+mode, bridged from the Docker host to containers as
+`socks5://172.17.0.1:40001`.
+
+```bash
+sudo scripts/install-warp-proxy-bridge.sh
+echo 'GROK2API_BROWSER_PROXY_SERVER=socks5://172.17.0.1:40001' >> /opt/ai-aggregator/data/grok2api/service.env
+```
 
 Manual run example:
 

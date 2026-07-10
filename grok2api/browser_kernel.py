@@ -198,6 +198,7 @@ class BrowserKernel:
                         "5800/tcp": account.browser_port,
                         "9222/tcp": account.browser_debug_port,
                     },
+                    extra_hosts={"host.docker.internal": "host-gateway"},
                     security_opt=["seccomp=unconfined"],
                     shm_size="1g",
                 )

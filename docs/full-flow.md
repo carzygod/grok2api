@@ -54,6 +54,12 @@ If `https://accounts.x.ai/check-login` returns `Blocked due to abusive traffic
 patterns` even before login, use `GROK2API_BROWSER_PROXY_SERVER` to route only
 the account browser through a clean HTTP or SOCKS egress. This changes the
 browser's outbound network path without changing the API service URL.
+HZ01 has been verified with Cloudflare WARP in proxy mode plus a host bridge:
+`GROK2API_BROWSER_PROXY_SERVER=socks5://172.17.0.1:40001`.
+
+```bash
+sudo scripts/install-warp-proxy-bridge.sh
+```
 
 ## 3. Add Account
 
