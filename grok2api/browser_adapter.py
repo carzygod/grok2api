@@ -709,8 +709,13 @@ class GrokBrowserAdapter:
             "upgrade",
             "privacy",
             "terms",
+            "fast",
         }
-        lines = [line for line in lines if line.lower() not in noisy]
+        lines = [
+            line
+            for line in lines
+            if line.lower() not in noisy and not line.lower().startswith("thought for ")
+        ]
         return "\n".join(lines)[-8000:]
 
     @staticmethod
