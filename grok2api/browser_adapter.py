@@ -569,20 +569,6 @@ class GrokBrowserAdapter:
     async def _attach_input_files(self, paths: list[str]) -> bool:
         if not paths:
             return False
-        selectors = (
-            "input[type='file']",
-            "input[accept*='image']",
-            "input[accept*='video']",
-        )
-        for selector in selectors:
-            try:
-                locator = self.page.locator(selector)
-                if await locator.count() > 0:
-                    await locator.last.set_input_files(paths, timeout=10_000)
-                    await self._settle(1)
-                    return True
-            except Exception:
-                continue
         button_selectors = (
             "button[aria-label*='Attach' i]",
             "button[aria-label*='Upload' i]",
@@ -608,7 +594,21 @@ class GrokBrowserAdapter:
                         await button.click(timeout=3_000)
                     chooser = await chooser_info.value
                     await chooser.set_files(paths)
-                    await self._settle(1)
+                    await self._settle(3)
+                    return True
+            except Exception:
+                continue
+        selectors = (
+            "input[type='file']",
+            "input[accept*='image']",
+            "input[accept*='video']",
+        )
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                if await locator.count() > 0:
+                    await locator.last.set_input_files(paths, timeout=10_000)
+                    await self._settle(3)
                     return True
             except Exception:
                 continue
