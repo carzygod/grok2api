@@ -206,7 +206,13 @@ class GrokBrowserAdapter:
             media_items,
             prefix="chat-input",
         )
-        await self._attach_input_files(upload_files)
+        attached = await self._attach_input_files(upload_files)
+        if upload_files and not attached:
+            raise BrowserAdapterError(
+                "media_upload_failed",
+                "Input media was prepared, but the Grok upload control was not found.",
+                details={"count": len(upload_files)},
+            )
         if prompt_refs:
             prompt = prompt + "\nReference media URLs: " + " ".join(prompt_refs)
         before = await self._body_text()
@@ -236,7 +242,13 @@ class GrokBrowserAdapter:
         await self._require_logged_in()
         await self._select_imagine_mode("image")
         upload_files, prompt_refs = await self._materialize_input_media(images, prefix="image-input")
-        await self._attach_input_files(upload_files)
+        attached = await self._attach_input_files(upload_files)
+        if upload_files and not attached:
+            raise BrowserAdapterError(
+                "media_upload_failed",
+                "Reference media was prepared, but the Grok Imagine upload control was not found.",
+                details={"count": len(upload_files)},
+            )
         final_prompt = self._generation_prompt(
             prompt,
             count=n,
@@ -282,7 +294,13 @@ class GrokBrowserAdapter:
         await self._select_imagine_mode("video")
         upload_files, prompt_refs = await self._materialize_input_media(None, prefix="video-input")
         seen = await self._video_sources()
-        await self._attach_input_files(upload_files)
+        attached = await self._attach_input_files(upload_files)
+        if upload_files and not attached:
+            raise BrowserAdapterError(
+                "media_upload_failed",
+                "Reference media was prepared, but the Grok Imagine upload control was not found.",
+                details={"count": len(upload_files)},
+            )
         await self._submit_prompt(self._generation_prompt(prompt, references=prompt_refs))
         videos = await self._wait_for_new_videos(seen, timeout_s=timeout_s)
         if not videos:
@@ -325,7 +343,13 @@ class GrokBrowserAdapter:
         await self._require_logged_in()
         await self._select_imagine_mode("video")
         upload_files, prompt_refs = await self._materialize_input_media(images, prefix="video-input")
-        await self._attach_input_files(upload_files)
+        attached = await self._attach_input_files(upload_files)
+        if upload_files and not attached:
+            raise BrowserAdapterError(
+                "media_upload_failed",
+                "Reference media was prepared, but the Grok Imagine upload control was not found.",
+                details={"count": len(upload_files)},
+            )
         seen = await self._video_sources()
         final_prompt = self._generation_prompt(
             prompt,
