@@ -863,6 +863,16 @@ class GrokBrowserAdapter:
                 best_rows = rows
                 if not first_seen_at:
                     first_seen_at = time.monotonic()
+                asset_rows = [
+                    item
+                    for item in rows
+                    if "assets.grok.com" in item.get("url", "").lower()
+                    and "/content" in item.get("url", "").lower()
+                    and int(item.get("width") or 0) >= 512
+                    and int(item.get("height") or 0) >= 512
+                ]
+                if asset_rows:
+                    return asset_rows
                 preferred = [
                     item
                     for item in rows
