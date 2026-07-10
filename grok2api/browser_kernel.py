@@ -419,7 +419,7 @@ class BrowserKernel:
             debug_url = await self._require_debug_url(browser)
             async with self._lock_for(account.id):
                 async with GrokBrowserAdapter(account, debug_url) as adapter:
-                    content = await adapter.chat(body.messages)
+                    content = await asyncio.wait_for(adapter.chat(body.messages), timeout=240)
                     await self._writeback_cookies(account.id, adapter)
             result = {"content": content}
             self.store.update_task(task.task_id, status="completed", result=result)
@@ -433,6 +433,16 @@ class BrowserKernel:
                 result=exc.payload(),
             )
             raise
+        except asyncio.TimeoutError as exc:
+            message = "Grok browser operation timed out."
+            self.store.update_task(
+                task.task_id,
+                account_id=account.id if account else account_id,
+                status="failed",
+                error=message,
+                result={"error": "adapter_timeout", "message": message},
+            )
+            raise BrowserAdapterError("adapter_timeout", message, 504) from exc
         except Exception as exc:
             message = str(exc)
             self.store.update_task(
@@ -466,12 +476,15 @@ class BrowserKernel:
             debug_url = await self._require_debug_url(browser)
             async with self._lock_for(account.id):
                 async with GrokBrowserAdapter(account, debug_url) as adapter:
-                    data = await adapter.generate_image(
-                        body.prompt,
-                        response_format="b64_json",
-                        n=body.n,
-                        size=body.size,
-                        images=body.image,
+                    data = await asyncio.wait_for(
+                        adapter.generate_image(
+                            body.prompt,
+                            response_format="b64_json",
+                            n=body.n,
+                            size=body.size,
+                            images=body.image,
+                        ),
+                        timeout=260,
                     )
                     await self._writeback_cookies(account.id, adapter)
             result = {"data": data}
@@ -486,6 +499,16 @@ class BrowserKernel:
                 result=exc.payload(),
             )
             raise
+        except asyncio.TimeoutError as exc:
+            message = "Grok image generation timed out."
+            self.store.update_task(
+                task.task_id,
+                account_id=account.id if account else account_id,
+                status="failed",
+                error=message,
+                result={"error": "adapter_timeout", "message": message},
+            )
+            raise BrowserAdapterError("adapter_timeout", message, 504) from exc
         except Exception as exc:
             message = str(exc)
             self.store.update_task(
@@ -519,12 +542,15 @@ class BrowserKernel:
             debug_url = await self._require_debug_url(browser)
             async with self._lock_for(account.id):
                 async with GrokBrowserAdapter(account, debug_url) as adapter:
-                    result = await adapter.generate_video_with_options(
-                        body.prompt,
-                        duration=body.duration,
-                        aspect_ratio=body.aspect_ratio,
-                        size=body.size,
-                        images=body.image,
+                    result = await asyncio.wait_for(
+                        adapter.generate_video_with_options(
+                            body.prompt,
+                            duration=body.duration,
+                            aspect_ratio=body.aspect_ratio,
+                            size=body.size,
+                            images=body.image,
+                        ),
+                        timeout=420,
                     )
                     await self._writeback_cookies(account.id, adapter)
             self.store.update_task(task.task_id, status="completed", result=result)
@@ -538,6 +564,16 @@ class BrowserKernel:
                 result=exc.payload(),
             )
             raise
+        except asyncio.TimeoutError as exc:
+            message = "Grok video generation timed out."
+            self.store.update_task(
+                task.task_id,
+                account_id=account.id if account else account_id,
+                status="failed",
+                error=message,
+                result={"error": "adapter_timeout", "message": message},
+            )
+            raise BrowserAdapterError("adapter_timeout", message, 504) from exc
         except Exception as exc:
             message = str(exc)
             self.store.update_task(

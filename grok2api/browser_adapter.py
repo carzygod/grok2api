@@ -671,18 +671,26 @@ class GrokBrowserAdapter:
     async def _wait_for_text_delta(self, before: str, prompt: str, *, timeout_s: int) -> str:
         deadline = time.monotonic() + timeout_s
         best = ""
+        best_normalized = ""
+        first_seen_at = 0.0
         stable_seen = 0
         while time.monotonic() < deadline:
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
             text = await self._body_text()
             candidate = self._extract_answer(before, text, prompt)
-            if len(candidate) > len(best):
+            normalized = re.sub(r"\s+", " ", candidate).strip()
+            if candidate and not first_seen_at:
+                first_seen_at = time.monotonic()
+            if len(candidate) > len(best) or (normalized and normalized != best_normalized):
                 best = candidate
+                best_normalized = normalized
                 stable_seen = 0
             elif best:
                 stable_seen += 1
-                if stable_seen >= 3:
+                if stable_seen >= 2:
                     return best.strip()
+            if best and first_seen_at and time.monotonic() - first_seen_at >= 18:
+                return best.strip()
         return best.strip()
 
     @staticmethod
