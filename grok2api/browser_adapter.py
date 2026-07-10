@@ -20,6 +20,7 @@ from .models import Account, ChatMessage
 APP_URL = "https://grok.com/"
 IMAGES_URL = "https://grok.com/imagine"
 MAX_INPUT_MEDIA_BYTES = 80 * 1024 * 1024
+MAX_OUTPUT_MEDIA_BYTES = 250 * 1024 * 1024
 
 
 class BrowserAdapterError(RuntimeError):
@@ -309,6 +310,9 @@ class GrokBrowserAdapter:
                 "No generated video was found in the Grok page before timeout.",
             )
         out = []
+        downloaded = await self._download_video_result()
+        if downloaded.get("b64_json"):
+            out.append(downloaded)
         for url in videos:
             material = await self._url_to_b64(url, default_media_type="video/mp4")
             if material.get("b64_json"):
@@ -366,6 +370,9 @@ class GrokBrowserAdapter:
                 "No generated video was found in the Grok page before timeout.",
             )
         out = []
+        downloaded = await self._download_video_result()
+        if downloaded.get("b64_json"):
+            out.append(downloaded)
         for url in videos:
             material = await self._url_to_b64(url, default_media_type="video/mp4")
             if material.get("b64_json"):
@@ -623,8 +630,9 @@ class GrokBrowserAdapter:
     async def _select_imagine_mode(self, mode: str) -> bool:
         labels = {
             "image": ("Image", "Images", "Generate images"),
-            "video": ("Video", "Videos", "Animate", "Generate videos"),
+            "video": ("Video", "Videos", "Generate videos"),
         }.get(mode, (mode,))
+        normalized_labels = {label.lower() for label in labels}
         selectors: list[str] = []
         for label in labels:
             selectors.extend(
@@ -644,6 +652,18 @@ class GrokBrowserAdapter:
                     if not await item.is_visible(timeout=500):
                         continue
                     if not await item.is_enabled(timeout=500):
+                        continue
+                    text = ""
+                    aria = ""
+                    try:
+                        text = (await item.inner_text(timeout=500)).strip().lower()
+                    except Exception:
+                        text = ""
+                    try:
+                        aria = ((await item.get_attribute("aria-label", timeout=500)) or "").strip().lower()
+                    except Exception:
+                        aria = ""
+                    if text not in normalized_labels and aria not in normalized_labels:
                         continue
                     await item.click(timeout=3_000)
                     await self._settle(0.8)
@@ -896,10 +916,15 @@ class GrokBrowserAdapter:
             header, _, payload = url.partition(",")
             media_type = header.split(";", 1)[0].removeprefix("data:") or default_media_type
             return {"b64_json": payload, "media_type": media_type} if payload else {}
-        result = await self.page.evaluate(
-            """async ({url, defaultMediaType}) => {
+        try:
+            result = await asyncio.wait_for(
+                self.page.evaluate(
+                    """async ({url, defaultMediaType}) => {
                 try {
-                    const res = await fetch(url, {credentials: 'include'});
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 90000);
+                    const res = await fetch(url, {credentials: 'include', signal: controller.signal});
+                    clearTimeout(timer);
                     if (!res.ok) return {};
                     const blob = await res.blob();
                     return await new Promise(resolve => {
@@ -915,9 +940,53 @@ class GrokBrowserAdapter:
                     return {};
                 }
             }""",
-            {"url": url, "defaultMediaType": default_media_type},
-        )
+                    {"url": url, "defaultMediaType": default_media_type},
+                ),
+                timeout=120,
+            )
+        except Exception:
+            return {}
         return result or {}
+
+    async def _download_video_result(self) -> dict[str, str]:
+        selectors = (
+            "button[aria-label*='Download' i]",
+            "a[aria-label*='Download' i]",
+            "a[download]",
+        )
+        deadline = time.monotonic() + 75
+        while time.monotonic() < deadline:
+            for selector in selectors:
+                try:
+                    locator = self.page.locator(selector)
+                    count = await locator.count()
+                    for index in range(count - 1, -1, -1):
+                        item = locator.nth(index)
+                        if not await item.is_visible(timeout=500):
+                            continue
+                        if not await item.is_enabled(timeout=500):
+                            continue
+                        async with self.page.expect_download(timeout=60_000) as download_info:
+                            await item.click(timeout=5_000)
+                        download = await download_info.value
+                        filename = download.suggested_filename or ""
+                        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                        if not media_type.startswith("video/"):
+                            continue
+                        path = await download.path()
+                        if not path:
+                            continue
+                        raw = Path(path).read_bytes()
+                        if not raw or len(raw) > MAX_OUTPUT_MEDIA_BYTES:
+                            continue
+                        return {
+                            "b64_json": base64.b64encode(raw).decode("ascii"),
+                            "media_type": media_type,
+                        }
+                except Exception:
+                    continue
+            await self._settle(2)
+        return {}
 
     async def _video_sources(self) -> set[str]:
         rows = await self._media_sources("video")
