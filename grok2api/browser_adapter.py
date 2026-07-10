@@ -850,6 +850,8 @@ class GrokBrowserAdapter:
 
     async def _wait_for_new_images(self, seen: set[str], *, timeout_s: int) -> list[dict[str, str]]:
         deadline = time.monotonic() + timeout_s
+        first_seen_at = 0.0
+        best_rows: list[dict[str, str]] = []
         while time.monotonic() < deadline:
             await asyncio.sleep(4)
             rows = [
@@ -858,8 +860,24 @@ class GrokBrowserAdapter:
                 if item.get("url") and item.get("url") not in seen
             ]
             if rows:
-                return rows
-        return []
+                best_rows = rows
+                if not first_seen_at:
+                    first_seen_at = time.monotonic()
+                preferred = [
+                    item
+                    for item in rows
+                    if (
+                        item.get("url", "").startswith("data:image/")
+                        or "generated" in str(item.get("alt", "")).lower()
+                    )
+                    and int(item.get("width") or 0) >= 512
+                    and int(item.get("height") or 0) >= 512
+                ]
+                if preferred:
+                    return preferred
+                if first_seen_at and time.monotonic() - first_seen_at >= 25:
+                    return rows
+        return best_rows
 
     async def _url_to_b64(self, url: str, *, default_media_type: str) -> dict[str, str]:
         if not url:
@@ -929,7 +947,13 @@ class GrokBrowserAdapter:
                         const width = img.naturalWidth || img.width || 0;
                         const height = img.naturalHeight || img.height || 0;
                         if (width && height && (width < 96 || height < 96)) continue;
-                        push(img.currentSrc || img.src || largestFromSrcset(img.srcset), {width, height, kind: 'image'});
+                        push(img.currentSrc || img.src || largestFromSrcset(img.srcset), {
+                            width,
+                            height,
+                            kind: 'image',
+                            alt: img.alt || '',
+                            className: String(img.className || '')
+                        });
                     }
                     for (const source of Array.from(document.querySelectorAll('picture source[srcset]'))) {
                         push(largestFromSrcset(source.srcset), {kind: 'image'});
