@@ -48,6 +48,9 @@ The browser-profile control loop is wired into the API surface:
 - account capability tracking and task-based rotation metrics
 - screenshot, HTML, and Playwright trace capture around adapter failures
 - chat streaming response support using OpenAI-compatible SSE chunks
+- image/video attachments in chat messages for image-to-text and media-to-text
+- `/v1/responses` compatibility for OpenAI-style `input_text` and `input_image` parts
+- image generation, image edit, image variation, and video generation routes with JSON or multipart media inputs
 
 The closed loop is:
 
@@ -56,7 +59,7 @@ The closed loop is:
 3. Log in to Grok inside that browser.
 4. Run Validate.
 5. Validate attaches to Chrome DevTools, opens Grok Web, checks login state, and marks the account `ready` only when the prompt input is reachable.
-6. `/v1/chat/completions`, `/v1/images/generations`, and `/v1/video/generations` pick a ready account and drive the same browser profile.
+6. `/v1/chat/completions`, `/v1/responses`, `/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations`, and `/v1/video/generations` pick a ready account and drive the same browser profile.
 7. Every generation request creates a task record and updates task/account state.
 8. Image and video outputs are fetched in the browser context, saved under the service data directory, and returned as service-local `/v1/files/...` URLs unless image requests use `response_format=b64_json`.
 
@@ -68,9 +71,9 @@ Plain cookie replay is brittle for Grok Web, especially when media generation or
 
 | Capability | Target |
 |---|---|
-| Text | `https://grok.com/` |
-| Image | `https://grok.com/imagine` |
-| Video | `https://grok.com/imagine` when video generation is available to the account |
+| Text and image-to-text | `https://grok.com/` |
+| Image generation/edit/variation | `https://grok.com/imagine` |
+| Video generation/image-to-video | `https://grok.com/imagine` when video generation is available to the account |
 
 ## Login Design
 
@@ -128,12 +131,74 @@ GET /v1/models
 GET /v1/files/{file_id}
 GET /v1/tasks/{task_id}
 POST /v1/chat/completions
+POST /v1/responses
 POST /v1/images/generations
+POST /v1/images/edits
+POST /v1/images/variations
 POST /v1/video/generations
+POST /v1/videos
 POST /v1/videos/generations
 ```
 
 Request bodies support optional `account_id` so a caller can force a specific Grok browser profile.
+Image and video request bodies can be JSON with `image` as a data URL, local path,
+or HTTP(S) URL. Image edit, variation, and video endpoints also accept
+`multipart/form-data` with an `image` file field.
+
+Image-to-text through chat:
+
+```json
+{
+  "model": "grok-vision",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+      ]
+    }
+  ]
+}
+```
+
+Responses-style image-to-text:
+
+```json
+{
+  "model": "grok-vision",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "What is in this image?"},
+        {"type": "input_image", "image_url": "https://example.com/ref.png"}
+      ]
+    }
+  ]
+}
+```
+
+Image edit with multipart:
+
+```bash
+curl -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -F model=grok-imagine-edit \
+  -F prompt='make it cinematic' \
+  -F image=@ref.png \
+  http://SERVER_IP:18024/v1/images/edits
+```
+
+Image-to-video with multipart:
+
+```bash
+curl -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -F model=grok-video \
+  -F prompt='animate this scene' \
+  -F duration=6 \
+  -F image=@ref.png \
+  http://SERVER_IP:18024/v1/videos
+```
 
 ## Build And Run
 
@@ -260,9 +325,11 @@ data/
 - Adapter failures save screenshot, page HTML, and Playwright trace artifacts under `data/diagnostics/`.
 - Chat/image/video calls create SQLite task records and expose `/v1/tasks/{task_id}` plus Admin task views.
 - Chat streaming is supported through OpenAI-compatible SSE chunks after the browser response is available.
+- Chat and Responses requests can upload OpenAI-style image/video content parts before asking Grok for text.
 - Account validation records detected capabilities, and account rotation considers recent task failures.
 - Browser containers expose CDP through an internal loopback Chrome port plus a container-level TCP proxy.
 - Request fields such as image count, size, video duration, aspect ratio, and reference media are applied as browser prompt constraints and best-effort uploads.
+- Grok Imagine image/video mode selection is attempted before generation, then DOM media extraction scans image/video/source/link/background nodes and fetches protected/blob media in the browser context.
 
 ## Residual External Limits
 
@@ -285,8 +352,11 @@ data/
 | `/v1/models` | Returns the exposed Grok Web model list |
 | `/v1/files/{file_id}` | Publicly serves generated local media files by opaque file id |
 | `/v1/tasks/{task_id}` | Returns stored task status, sanitized request data, result metadata, and error details |
-| `/v1/chat/completions` | Requires a ready account, drives `grok.com/` through CDP, and supports non-streaming or SSE streaming responses |
-| `/v1/images/generations` | Requires a ready account, drives `grok.com/imagine`, applies count/size/reference constraints, and returns local downloadable URLs by default |
-| `/v1/video/generations` | Requires a ready account, applies video constraints, waits for video sources on the Grok Web page, and returns local downloadable URLs when the media can be fetched |
+| `/v1/chat/completions` | Requires a ready account, drives `grok.com/` through CDP, supports text and image/video attachments, and supports non-streaming or SSE streaming responses |
+| `/v1/responses` | Converts OpenAI Responses-style text/image input parts into the same browser chat adapter and returns `output_text` |
+| `/v1/images/generations` | Requires a ready account, drives Grok Imagine image mode, applies count/size/reference constraints, and returns local downloadable URLs by default |
+| `/v1/images/edits` | Accepts JSON or multipart reference images and prompt text, then drives Grok Imagine image mode |
+| `/v1/images/variations` | Accepts JSON or multipart reference images and creates variations through Grok Imagine image mode |
+| `/v1/video/generations`, `/v1/videos`, `/v1/videos/generations` | Requires a ready account, applies video constraints/reference media, waits for video sources on the Grok Web page, and returns local downloadable URLs when the media can be fetched |
 
 This remains strict: a reachable Admin UI or a running Chromium profile is not enough. The account must pass browser validation before API requests can run.

@@ -598,11 +598,15 @@ class BrowserKernel:
             if isinstance(content, str):
                 text = content
             else:
-                text = " ".join(
-                    str(item.get("text") or item.get("content") or item.get("image_url") or "")
-                    for item in content
-                    if isinstance(item, dict)
-                )
+                chunks = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("text") or item.get("content"):
+                        chunks.append(str(item.get("text") or item.get("content")))
+                    elif any(key in item for key in ("image_url", "input_image", "video_url", "file")):
+                        chunks.append("[media]")
+                text = " ".join(chunks)
             if text.strip():
                 parts.append(f"{role}: {text.strip()}")
         return "\n".join(parts)

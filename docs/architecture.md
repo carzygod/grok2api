@@ -13,7 +13,7 @@ The stable identity is not a raw Cookie header. The stable identity is a server-
 | Browser kernel | Account profile paths, browser lifecycle, CDP endpoint probing, Playwright orchestration, account locks |
 | noVNC Chromium | User-operated server-side browser for login and verification |
 | CDP proxy | Container-level TCP proxy from `0.0.0.0:9222` to Chrome's loopback DevTools port |
-| Grok adapters | Browser CDP implementations for chat and account-available Grok Imagine image/video surfaces |
+| Grok adapters | Browser CDP implementations for chat, image-to-text attachments, and account-available Grok Imagine image/video surfaces |
 | Media store | Saves fetched image/video media under the service data directory and serves opaque `/v1/files/...` URLs |
 | Diagnostics store | Saves screenshots, HTML, and Playwright traces for adapter failures |
 
@@ -38,9 +38,10 @@ The stable identity is not a raw Cookie header. The stable identity is a server-
 4. The account lock is acquired.
 5. The browser CDP endpoint is probed from multiple candidate URLs.
 6. Playwright connects over CDP and drives the relevant Grok Web surface.
-7. Media outputs are fetched in the browser context and saved locally when needed.
-8. The task row is updated to `completed` or `failed`.
-9. Failures capture screenshot, HTML, and trace diagnostics when the page is reachable.
+7. Input media is normalized from JSON data URLs, HTTP(S) URLs, local paths, or multipart uploads and attached to the Grok Web prompt when possible.
+8. Media outputs are fetched in the browser context and saved locally when needed.
+9. The task row is updated to `completed` or `failed`.
+10. Failures capture screenshot, HTML, and trace diagnostics when the page is reachable.
 
 ## Why Not Cookie Only
 
@@ -52,8 +53,8 @@ Grok media must be driven through the logged-in Grok Web surface rather than coo
 
 | Capability | Target Web Surface |
 |---|---|
-| Text | `https://grok.com/` |
-| Image | `https://grok.com/imagine` |
-| Video | `https://grok.com/imagine` when video generation is available to the account |
+| Text and image-to-text | `https://grok.com/` |
+| Image generation/edit/variation | `https://grok.com/imagine` |
+| Video generation/image-to-video | `https://grok.com/imagine` when video generation is available to the account |
 
-The adapter uses DOM extraction plus browser-context `fetch()` to convert protected/blob media into service-local downloadable files. Network-response extraction and download-button extraction can still be added later as additional strategies if xAI changes the DOM surface.
+The adapter uploads input media through visible file inputs or file chooser buttons, then uses DOM extraction plus browser-context `fetch()` to convert protected/blob media into service-local downloadable files. It scans images, videos, sources, links, and background-image nodes so minor Grok UI changes are less likely to hide completed media.

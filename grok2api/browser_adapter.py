@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import mimetypes
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+import httpx
 
 from .config import settings
 from .models import Account, ChatMessage
@@ -15,6 +19,7 @@ from .models import Account, ChatMessage
 
 APP_URL = "https://grok.com/"
 IMAGES_URL = "https://grok.com/imagine"
+MAX_INPUT_MEDIA_BYTES = 80 * 1024 * 1024
 
 
 class BrowserAdapterError(RuntimeError):
@@ -136,14 +141,17 @@ class GrokBrowserAdapter:
         title = await self._safe_title()
         page_url = self.page.url
         image_page_ready = False
+        video_page_ready = False
 
         if input_ready:
             try:
                 await self._goto(IMAGES_URL, timeout_ms=60_000)
                 await self._settle(2)
                 image_page_ready = not await self._login_detected()
+                video_page_ready = image_page_ready and await self._video_capability_hint()
             except Exception:
                 image_page_ready = False
+                video_page_ready = False
             await self._goto(APP_URL, timeout_ms=60_000)
             await self._settle(1)
 
@@ -172,7 +180,7 @@ class GrokBrowserAdapter:
         capabilities = ["chat"]
         if image_page_ready:
             capabilities.append("image")
-        if await self._video_capability_hint():
+        if video_page_ready:
             capabilities.append("video")
         return BrowserValidation(
             status="ready",
@@ -186,12 +194,21 @@ class GrokBrowserAdapter:
         )
 
     async def chat(self, messages: list[ChatMessage], timeout_s: int = 150) -> str:
-        prompt = self._messages_to_prompt(messages)
+        prompt, media_items = self._messages_to_prompt_and_media(messages)
+        if not prompt and media_items:
+            prompt = "Describe the attached media."
         if not prompt:
             raise BrowserAdapterError("empty_prompt", "No user prompt was supplied.", status_code=400)
         await self._goto(APP_URL, timeout_ms=60_000)
         await self._settle(2)
         await self._require_logged_in()
+        upload_files, prompt_refs = await self._materialize_input_media(
+            media_items,
+            prefix="chat-input",
+        )
+        await self._attach_input_files(upload_files)
+        if prompt_refs:
+            prompt = prompt + "\nReference media URLs: " + " ".join(prompt_refs)
         before = await self._body_text()
         await self._submit_prompt(prompt)
         answer = await self._wait_for_text_delta(before, prompt, timeout_s=timeout_s)
@@ -217,7 +234,8 @@ class GrokBrowserAdapter:
         await self._goto(IMAGES_URL, timeout_ms=60_000)
         await self._settle(2)
         await self._require_logged_in()
-        upload_files, prompt_refs = self._materialize_input_media(images, prefix="image-input")
+        await self._select_imagine_mode("image")
+        upload_files, prompt_refs = await self._materialize_input_media(images, prefix="image-input")
         await self._attach_input_files(upload_files)
         final_prompt = self._generation_prompt(
             prompt,
@@ -261,7 +279,8 @@ class GrokBrowserAdapter:
         await self._goto(IMAGES_URL, timeout_ms=60_000)
         await self._settle(2)
         await self._require_logged_in()
-        upload_files, prompt_refs = self._materialize_input_media(None, prefix="video-input")
+        await self._select_imagine_mode("video")
+        upload_files, prompt_refs = await self._materialize_input_media(None, prefix="video-input")
         seen = await self._video_sources()
         await self._attach_input_files(upload_files)
         await self._submit_prompt(self._generation_prompt(prompt, references=prompt_refs))
@@ -304,7 +323,8 @@ class GrokBrowserAdapter:
         await self._goto(IMAGES_URL, timeout_ms=60_000)
         await self._settle(2)
         await self._require_logged_in()
-        upload_files, prompt_refs = self._materialize_input_media(images, prefix="video-input")
+        await self._select_imagine_mode("video")
+        upload_files, prompt_refs = await self._materialize_input_media(images, prefix="video-input")
         await self._attach_input_files(upload_files)
         seen = await self._video_sources()
         final_prompt = self._generation_prompt(
@@ -527,6 +547,67 @@ class GrokBrowserAdapter:
                     return True
             except Exception:
                 continue
+        button_selectors = (
+            "button[aria-label*='Attach' i]",
+            "button[aria-label*='Upload' i]",
+            "button[aria-label*='Add files' i]",
+            "button[aria-label*='Add image' i]",
+            "button[aria-label*='Image' i]",
+            "button:has-text('Attach')",
+            "button:has-text('Upload')",
+            "button:has-text('Add image')",
+            "button:has-text('Image')",
+        )
+        for selector in button_selectors:
+            try:
+                locator = self.page.locator(selector)
+                count = await locator.count()
+                for index in range(count - 1, -1, -1):
+                    button = locator.nth(index)
+                    if not await button.is_visible(timeout=500):
+                        continue
+                    if not await button.is_enabled(timeout=500):
+                        continue
+                    async with self.page.expect_file_chooser(timeout=3_000) as chooser_info:
+                        await button.click(timeout=3_000)
+                    chooser = await chooser_info.value
+                    await chooser.set_files(paths)
+                    await self._settle(1)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _select_imagine_mode(self, mode: str) -> bool:
+        labels = {
+            "image": ("Image", "Images", "Generate images"),
+            "video": ("Video", "Videos", "Animate", "Generate videos"),
+        }.get(mode, (mode,))
+        selectors: list[str] = []
+        for label in labels:
+            selectors.extend(
+                [
+                    f"[role='tab']:has-text('{label}')",
+                    f"button:has-text('{label}')",
+                    f"button[aria-label*='{label}' i]",
+                    f"[role='button'][aria-label*='{label}' i]",
+                ]
+            )
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                count = await locator.count()
+                for index in range(count):
+                    item = locator.nth(index)
+                    if not await item.is_visible(timeout=500):
+                        continue
+                    if not await item.is_enabled(timeout=500):
+                        continue
+                    await item.click(timeout=3_000)
+                    await self._settle(0.8)
+                    return True
+            except Exception:
+                continue
         return False
 
     async def _click_send_button(self) -> bool:
@@ -620,9 +701,9 @@ class GrokBrowserAdapter:
             return [value] if value.strip() else []
         return [item for item in value if isinstance(item, str) and item.strip()]
 
-    def _materialize_input_media(
+    async def _materialize_input_media(
         self,
-        value: str | list[str] | None,
+        value: str | list[str] | list[Any] | None,
         *,
         prefix: str,
     ) -> tuple[list[str], list[str]]:
@@ -634,23 +715,20 @@ class GrokBrowserAdapter:
             if text.startswith("data:"):
                 header, _, payload = text.partition(",")
                 media_type = header.split(";", 1)[0].removeprefix("data:") or "application/octet-stream"
-                ext = {
-                    "image/jpeg": ".jpg",
-                    "image/png": ".png",
-                    "image/webp": ".webp",
-                    "video/mp4": ".mp4",
-                    "video/webm": ".webm",
-                }.get(media_type.lower(), ".bin")
                 try:
                     raw = base64.b64decode(payload, validate=False)
                 except Exception:
                     references.append(text[:200])
                     continue
-                root.mkdir(parents=True, exist_ok=True)
-                digest = hashlib.sha256(raw).hexdigest()[:16]
-                path = root / f"{prefix}-{int(time.time())}-{digest}{ext}"
-                path.write_bytes(raw)
+                path = self._write_input_media(root, prefix, raw, media_type)
                 upload_files.append(str(path))
+                continue
+            if text.startswith(("http://", "https://")):
+                downloaded = await self._download_input_media(text, root=root, prefix=prefix)
+                if downloaded:
+                    upload_files.append(str(downloaded))
+                else:
+                    references.append(text)
                 continue
             path = Path(text)
             if path.exists() and path.is_file():
@@ -659,32 +737,65 @@ class GrokBrowserAdapter:
                 references.append(text)
         return upload_files, references
 
+    @classmethod
+    def _write_input_media(
+        cls,
+        root: Path,
+        prefix: str,
+        raw: bytes,
+        media_type: str,
+    ) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        ext = cls._extension_for_media(media_type)
+        path = root / f"{prefix}-{int(time.time())}-{digest}{ext}"
+        path.write_bytes(raw)
+        return path
+
+    @staticmethod
+    def _extension_for_media(media_type: str) -> str:
+        known = {
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+            "video/mp4": ".mp4",
+            "video/webm": ".webm",
+            "video/quicktime": ".mov",
+        }
+        return known.get(media_type.lower()) or mimetypes.guess_extension(media_type) or ".bin"
+
+    async def _download_input_media(self, url: str, *, root: Path, prefix: str) -> Path | None:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+                response = await client.get(url)
+            if response.status_code >= 400:
+                return None
+            raw = response.content
+            if not raw or len(raw) > MAX_INPUT_MEDIA_BYTES:
+                return None
+            media_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+            if not media_type or media_type == "application/octet-stream":
+                guessed, _ = mimetypes.guess_type(urlparse(str(response.url)).path)
+                media_type = guessed or media_type or "application/octet-stream"
+            return self._write_input_media(root, prefix, raw, media_type)
+        except Exception:
+            return None
+
     async def _image_sources(self) -> set[str]:
-        rows = await self.page.evaluate(
-            """() => Array.from(document.images)
-                .map(img => img.currentSrc || img.src || '')
-                .filter(Boolean)"""
-        )
-        return set(rows or [])
+        rows = await self._media_sources("image")
+        return {item.get("url", "") for item in rows if item.get("url")}
 
     async def _wait_for_new_images(self, seen: set[str], *, timeout_s: int) -> list[dict[str, str]]:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             await asyncio.sleep(4)
-            rows = await self.page.evaluate(
-                """async (seen) => {
-                    const old = new Set(seen || []);
-                    const out = [];
-                    for (const img of Array.from(document.images)) {
-                        const src = img.currentSrc || img.src || '';
-                        if (!src || old.has(src)) continue;
-                        if ((img.naturalWidth || 0) < 128 || (img.naturalHeight || 0) < 128) continue;
-                        out.push({url: src, width: img.naturalWidth || 0, height: img.naturalHeight || 0});
-                    }
-                    return out;
-                }""",
-                list(seen),
-            )
+            rows = [
+                item
+                for item in await self._media_sources("image")
+                if item.get("url") and item.get("url") not in seen
+            ]
             if rows:
                 return rows
         return []
@@ -720,47 +831,135 @@ class GrokBrowserAdapter:
         return result or {}
 
     async def _video_sources(self) -> set[str]:
-        rows = await self.page.evaluate(
-            """() => Array.from(document.querySelectorAll('video, a'))
-                .map(el => el.currentSrc || el.src || el.href || '')
-                .filter(src => src && /\\.mp4|video|blob:/i.test(src))"""
-        )
-        return set(rows or [])
+        rows = await self._media_sources("video")
+        return {item.get("url", "") for item in rows if item.get("url")}
 
     async def _wait_for_new_videos(self, seen: set[str], *, timeout_s: int) -> list[str]:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             await asyncio.sleep(5)
-            rows = await self.page.evaluate(
-                """(seen) => {
-                    const old = new Set(seen || []);
-                    return Array.from(document.querySelectorAll('video, a'))
-                        .map(el => el.currentSrc || el.src || el.href || '')
-                        .filter(src => src && !old.has(src) && /\\.mp4|video|blob:/i.test(src));
-                }""",
-                list(seen),
-            )
+            rows = [
+                item.get("url", "")
+                for item in await self._media_sources("video")
+                if item.get("url") and item.get("url") not in seen
+            ]
             if rows:
                 return rows
         return []
 
-    @staticmethod
-    def _messages_to_prompt(messages: list[ChatMessage]) -> str:
-        parts = []
+    async def _media_sources(self, kind: str) -> list[dict[str, Any]]:
+        return await self.page.evaluate(
+            """(kind) => {
+                const out = [];
+                const push = (url, meta = {}) => {
+                    if (!url || typeof url !== 'string') return;
+                    const clean = url.trim();
+                    if (!clean || clean.startsWith('chrome-extension:')) return;
+                    out.push({url: clean, ...meta});
+                };
+                const largestFromSrcset = (srcset) => {
+                    if (!srcset) return '';
+                    const parts = String(srcset).split(',').map(part => part.trim()).filter(Boolean);
+                    if (!parts.length) return '';
+                    return parts[parts.length - 1].split(/\\s+/)[0] || '';
+                };
+                if (kind === 'image') {
+                    for (const img of Array.from(document.images)) {
+                        const width = img.naturalWidth || img.width || 0;
+                        const height = img.naturalHeight || img.height || 0;
+                        if (width && height && (width < 96 || height < 96)) continue;
+                        push(img.currentSrc || img.src || largestFromSrcset(img.srcset), {width, height, kind: 'image'});
+                    }
+                    for (const source of Array.from(document.querySelectorAll('picture source[srcset]'))) {
+                        push(largestFromSrcset(source.srcset), {kind: 'image'});
+                    }
+                    for (const el of Array.from(document.querySelectorAll('[style]'))) {
+                        const bg = getComputedStyle(el).backgroundImage || '';
+                        const match = bg.match(/url\\([\"']?([^\"')]+)[\"']?\\)/);
+                        if (match) push(match[1], {kind: 'image'});
+                    }
+                    return out.filter(item => /^(blob:|data:image\\/|https?:\\/\\/)/i.test(item.url));
+                }
+                for (const video of Array.from(document.querySelectorAll('video'))) {
+                    push(video.currentSrc || video.src, {
+                        width: video.videoWidth || video.clientWidth || 0,
+                        height: video.videoHeight || video.clientHeight || 0,
+                        kind: 'video'
+                    });
+                    for (const source of Array.from(video.querySelectorAll('source'))) {
+                        push(source.src, {kind: 'video'});
+                    }
+                }
+                for (const source of Array.from(document.querySelectorAll('source[src]'))) {
+                    push(source.src, {kind: 'video'});
+                }
+                for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+                    const href = a.href || '';
+                    const text = (a.innerText || a.getAttribute('aria-label') || '').toLowerCase();
+                    if (/\\.mp4|\\.webm|video|download|保存|下载/i.test(href) || /video|download|保存|下载/i.test(text)) {
+                        push(href, {kind: 'video'});
+                    }
+                }
+                return out.filter(item => /^(blob:|data:video\\/|https?:\\/\\/)/i.test(item.url) || /\\.mp4|\\.webm/i.test(item.url));
+            }""",
+            kind,
+        ) or []
+
+    @classmethod
+    def _messages_to_prompt_and_media(cls, messages: list[ChatMessage]) -> tuple[str, list[str]]:
+        parts: list[str] = []
+        media: list[str] = []
         for message in messages:
-            if isinstance(message.content, str):
-                content = message.content
-            else:
-                content = "\n".join(
-                    str(item.get("text") or item.get("content") or "")
-                    for item in message.content
-                    if isinstance(item, dict)
-                )
+            content, content_media = cls._content_to_text_and_media(message.content)
+            media.extend(content_media)
             if content.strip():
                 parts.append(f"{message.role}: {content.strip()}")
-        if not parts:
-            return ""
-        return "\n".join(parts)
+        return "\n".join(parts), media
+
+    @classmethod
+    def _content_to_text_and_media(cls, content: str | list[dict[str, Any]]) -> tuple[str, list[str]]:
+        if isinstance(content, str):
+            return content, []
+        text_parts: list[str] = []
+        media: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            media_value = cls._media_from_content_part(item)
+            if media_value:
+                media.append(media_value)
+                continue
+            text = item.get("text") or item.get("content")
+            if text is not None:
+                text_parts.append(str(text))
+        return "\n".join(part for part in text_parts if part.strip()), media
+
+    @staticmethod
+    def _media_from_content_part(item: dict[str, Any]) -> str:
+        for key in ("image_url", "input_image", "video_url", "input_video", "media_url", "url"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                nested = value.get("url") or value.get("image_url") or value.get("video_url")
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+        file_value = item.get("file")
+        if isinstance(file_value, dict):
+            for key in ("file_data", "data", "url"):
+                value = file_value.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        for key in ("file_data", "data"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip().startswith(("data:", "http://", "https://")):
+                return value.strip()
+        return ""
+
+    @classmethod
+    def _messages_to_prompt(cls, messages: list[ChatMessage]) -> str:
+        prompt, _ = cls._messages_to_prompt_and_media(messages)
+        return prompt
 
 
 def b64_data_url(media_type: str, data: bytes) -> str:

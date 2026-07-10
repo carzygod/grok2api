@@ -129,16 +129,31 @@ Current API contract:
 
 - no ready account returns `409 provider_login_required`
 - chat drives `https://grok.com/`
+- chat and `/v1/responses` support image/video attachments for image-to-text and media-to-text
 - chat streaming uses OpenAI-compatible SSE chunks after the browser response is available
 - image generation drives `https://grok.com/imagine`
-- image/video request fields are applied as prompt constraints and best-effort local/data-URL uploads
-- video generation drives `https://grok.com/imagine` and waits for video sources
+- image edit and variation endpoints accept JSON or multipart reference images
+- image/video request fields are applied as prompt constraints and best-effort local/data-URL/HTTP/multipart uploads
+- video generation drives `https://grok.com/imagine`, attempts video mode selection, and waits for video sources
 - generated image/video media is fetched in the browser context and returned as service-local `/v1/files/...` URLs when possible
 - every chat/image/video request writes a SQLite task record
 - `/v1/tasks/{task_id}` returns task status, sanitized request metadata, result metadata, and errors
 - adapter failures write screenshot, HTML, and trace diagnostics under `/app/data/diagnostics`
 
 This avoids false positives for text, image, or video generation: a browser must be running, CDP must be reachable, and the account must validate as ready.
+
+Supported public routes:
+
+```http
+POST /v1/chat/completions
+POST /v1/responses
+POST /v1/images/generations
+POST /v1/images/edits
+POST /v1/images/variations
+POST /v1/video/generations
+POST /v1/videos
+POST /v1/videos/generations
+```
 
 ## 8. Residual External Limits
 

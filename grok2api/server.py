@@ -3,9 +3,10 @@ from __future__ import annotations
 import time
 import uuid
 import json
+import base64
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from .browser_adapter import BrowserAdapterError
@@ -16,7 +17,11 @@ from .models import (
     AccountCreate,
     AccountUpdate,
     ChatCompletionRequest,
+    ChatMessage,
+    ImageEditRequest,
     ImageGenerationRequest,
+    ImageVariationRequest,
+    ResponsesRequest,
     VideoGenerationRequest,
 )
 from .store import AccountStore
@@ -34,7 +39,15 @@ MODEL_SPECS = [
         "object": "model",
         "created": 1783580000,
         "owned_by": "xai-web",
-        "capabilities": ["chat"],
+        "capabilities": ["chat", "vision"],
+    },
+    {
+        "id": "grok-vision",
+        "name": "Grok Web Vision",
+        "object": "model",
+        "created": 1783580000,
+        "owned_by": "xai-web",
+        "capabilities": ["chat", "vision"],
     },
     {
         "id": "grok-imagine",
@@ -43,6 +56,22 @@ MODEL_SPECS = [
         "created": 1783580000,
         "owned_by": "xai-web",
         "capabilities": ["image"],
+    },
+    {
+        "id": "grok-imagine-edit",
+        "name": "Grok Imagine Image Edit",
+        "object": "model",
+        "created": 1783580000,
+        "owned_by": "xai-web",
+        "capabilities": ["image", "image_edit"],
+    },
+    {
+        "id": "grok-imagine-variation",
+        "name": "Grok Imagine Image Variation",
+        "object": "model",
+        "created": 1783580000,
+        "owned_by": "xai-web",
+        "capabilities": ["image", "image_variation"],
     },
     {
         "id": "grok-video",
@@ -108,12 +137,12 @@ def create_app() -> FastAPI:
                 "text": {
                     "status": "browser_cdp_adapter",
                     "target": "https://grok.com/",
-                    "reason": "CDP adapter drives the logged-in account browser and requires a ready account profile.",
+                    "reason": "CDP adapter drives the logged-in account browser, supports text and image/video attachments, and requires a ready account profile.",
                 },
                 "image": {
                     "status": "browser_cdp_adapter",
                     "target": "https://grok.com/imagine",
-                    "reason": "CDP adapter drives Grok Images and extracts generated image nodes from the page.",
+                    "reason": "CDP adapter drives Grok Imagine image mode, uploads optional reference media, and extracts generated image nodes from the page.",
                 },
                 "video": {
                     "status": "browser_cdp_adapter_with_task_log",
@@ -143,6 +172,119 @@ def create_app() -> FastAPI:
                 result.get("account_id"),
             )
         return list(result or []), None, None
+
+    async def _upload_to_data_url(file: UploadFile) -> str:
+        raw = await file.read()
+        media_type = file.content_type or "application/octet-stream"
+        return f"data:{media_type};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    def _coerce_int_field(payload: dict, key: str) -> None:
+        if key in payload and payload[key] not in {None, ""}:
+            try:
+                payload[key] = int(payload[key])
+            except (TypeError, ValueError):
+                pass
+
+    async def _payload_from_request(request: Request) -> dict:
+        content_type = request.headers.get("content-type", "")
+        if "multipart/form-data" not in content_type.lower():
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            return dict(data or {})
+
+        form = await request.form()
+        payload: dict = {}
+        media: list[str] = []
+        for key, value in form.multi_items():
+            if hasattr(value, "read"):
+                data_url = await _upload_to_data_url(value)
+                if key in {"image", "images", "file", "files", "mask"}:
+                    media.append(data_url)
+                else:
+                    payload[key] = data_url
+                continue
+            if key in {"image", "images", "file", "files"}:
+                text = str(value)
+                if text:
+                    media.append(text)
+            else:
+                payload[key] = value
+        if media:
+            payload["image"] = media if len(media) > 1 else media[0]
+        for key in ("n", "duration"):
+            _coerce_int_field(payload, key)
+        return payload
+
+    async def _image_request_from_request(
+        request: Request,
+        cls: type[ImageGenerationRequest],
+        *,
+        default_prompt: str | None = None,
+    ) -> ImageGenerationRequest:
+        payload = await _payload_from_request(request)
+        if default_prompt and not str(payload.get("prompt") or "").strip():
+            payload["prompt"] = default_prompt
+        return cls.model_validate(payload)
+
+    async def _video_request_from_request(request: Request) -> VideoGenerationRequest:
+        return VideoGenerationRequest.model_validate(await _payload_from_request(request))
+
+    def _responses_messages(body: ResponsesRequest) -> list[ChatMessage]:
+        if isinstance(body.input, str):
+            return [ChatMessage(role="user", content=body.input)]
+        allowed_roles = {"system", "developer", "user", "assistant", "tool"}
+        messages: list[ChatMessage] = []
+        for item in body.input:
+            if isinstance(item, str):
+                messages.append(ChatMessage(role="user", content=item))
+                continue
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user")
+            if role not in allowed_roles:
+                role = "user"
+            content = item.get("content")
+            if content is None and item.get("type") in {"input_text", "input_image", "image_url"}:
+                content = [item]
+            if content is None:
+                content = item.get("text") or item.get("input") or ""
+            if isinstance(content, list):
+                messages.append(ChatMessage(role=role, content=content))
+            else:
+                messages.append(ChatMessage(role=role, content=str(content)))
+        return messages
+
+    def _response_object(
+        *,
+        response_id: str,
+        created: int,
+        model: str,
+        content: str,
+        task_id: str | None,
+        account_id: str | None,
+    ) -> dict:
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": created,
+            "model": model,
+            "status": "completed",
+            "task_id": task_id,
+            "account_id": account_id,
+            "output": [
+                {
+                    "id": "msg-" + uuid.uuid4().hex,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}],
+                }
+            ],
+            "output_text": content,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        }
 
     def _json_sse(data: dict) -> str:
         return "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
@@ -190,6 +332,17 @@ def create_app() -> FastAPI:
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             }
         )
+        yield "data: [DONE]\n\n"
+
+    async def _stream_responses_response(response: dict):
+        yield "event: response.created\n"
+        yield _json_sse({key: value for key, value in response.items() if key != "output_text"})
+        text = response.get("output_text", "")
+        for index in range(0, len(text), 1024):
+            yield "event: response.output_text.delta\n"
+            yield _json_sse({"delta": text[index : index + 1024]})
+        yield "event: response.completed\n"
+        yield _json_sse(response)
         yield "data: [DONE]\n\n"
 
     @app.get("/admin", response_class=HTMLResponse)
@@ -548,8 +701,34 @@ def create_app() -> FastAPI:
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
-    @app.post("/v1/images/generations", dependencies=[Depends(api_auth)])
-    async def image_generations(body: ImageGenerationRequest, request: Request):
+    @app.post("/v1/responses", dependencies=[Depends(api_auth)])
+    async def responses(body: ResponsesRequest):
+        chat_body = ChatCompletionRequest(
+            model=body.model,
+            messages=_responses_messages(body),
+            stream=False,
+            account_id=body.account_id,
+            temperature=body.temperature,
+            max_tokens=body.max_output_tokens,
+        )
+        try:
+            result = await browser_kernel.chat_completion(chat_body, body.account_id)
+        except BrowserAdapterError as exc:
+            raise _adapter_http_error(exc) from None
+        content, task_id, account_id = _chat_content(result)
+        response = _response_object(
+            response_id=f"resp-{uuid.uuid4().hex}",
+            created=int(time.time()),
+            model=body.model,
+            content=content,
+            task_id=task_id,
+            account_id=account_id,
+        )
+        if body.stream:
+            return StreamingResponse(_stream_responses_response(response), media_type="text/event-stream")
+        return response
+
+    async def _image_generation_response(body: ImageGenerationRequest, request: Request):
         try:
             result = await browser_kernel.image_generation(body, body.account_id)
         except BrowserAdapterError as exc:
@@ -591,9 +770,30 @@ def create_app() -> FastAPI:
             "data": data,
         }
 
+    @app.post("/v1/images/generations", dependencies=[Depends(api_auth)])
+    async def image_generations(request: Request):
+        body = await _image_request_from_request(request, ImageGenerationRequest)
+        return await _image_generation_response(body, request)
+
+    @app.post("/v1/images/edits", dependencies=[Depends(api_auth)])
+    async def image_edits(request: Request):
+        body = await _image_request_from_request(request, ImageEditRequest)
+        return await _image_generation_response(body, request)
+
+    @app.post("/v1/images/variations", dependencies=[Depends(api_auth)])
+    async def image_variations(request: Request):
+        body = await _image_request_from_request(
+            request,
+            ImageVariationRequest,
+            default_prompt="Create image variations from the provided reference image.",
+        )
+        return await _image_generation_response(body, request)
+
     @app.post("/v1/video/generations", dependencies=[Depends(api_auth)])
+    @app.post("/v1/videos", dependencies=[Depends(api_auth)])
     @app.post("/v1/videos/generations", dependencies=[Depends(api_auth)])
-    async def video_generations(body: VideoGenerationRequest, request: Request):
+    async def video_generations(request: Request):
+        body = await _video_request_from_request(request)
         try:
             result = await browser_kernel.video_generation(body, body.account_id)
         except BrowserAdapterError as exc:

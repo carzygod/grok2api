@@ -10,6 +10,8 @@ htmlcov/
 .mypy_cache/
 .pyre/
 .hypothesis/
+test-results/
+playwright-report/
 .venv/
 venv/
 .envrc
@@ -48,6 +50,7 @@ temp/
 *.tar
 *.tar.gz
 *.zip
+*.trace.zip
 *.png
 *.jpg
 *.jpeg

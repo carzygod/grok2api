@@ -56,7 +56,7 @@ class LoginSession(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
+    role: Literal["system", "developer", "user", "assistant", "tool"]
     content: str | list[dict[str, Any]]
 
 
@@ -69,6 +69,15 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int | None = None
 
 
+class ResponsesRequest(BaseModel):
+    model: str = "grok-web"
+    input: str | list[Any]
+    stream: bool = False
+    account_id: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
 class ImageGenerationRequest(BaseModel):
     model: str = "grok-imagine"
     prompt: str
@@ -77,6 +86,15 @@ class ImageGenerationRequest(BaseModel):
     response_format: str | None = None
     image: str | list[str] | None = None
     account_id: str | None = None
+
+
+class ImageEditRequest(ImageGenerationRequest):
+    model: str = "grok-imagine-edit"
+
+
+class ImageVariationRequest(ImageGenerationRequest):
+    model: str = "grok-imagine-variation"
+    prompt: str = "Create image variations from the provided reference image."
 
 
 class VideoGenerationRequest(BaseModel):

@@ -33,7 +33,14 @@ def test_models_endpoint_requires_api_key(monkeypatch, tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "list"
-    assert {item["id"] for item in body["data"]} >= {"grok-web", "grok-imagine", "grok-video"}
+    assert {item["id"] for item in body["data"]} >= {
+        "grok-web",
+        "grok-vision",
+        "grok-imagine",
+        "grok-imagine-edit",
+        "grok-imagine-variation",
+        "grok-video",
+    }
 
 
 def test_chat_without_ready_account_is_strict_409(monkeypatch, tmp_path):
@@ -95,6 +102,44 @@ def test_chat_stream_returns_sse_chunks(monkeypatch, tmp_path):
     assert "data: [DONE]" in response.text
 
 
+def test_responses_accepts_openai_vision_parts(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    server = _fresh_server(monkeypatch, tmp_path)
+    captured = {}
+
+    async def fake_chat_completion(body, _account_id=None):
+        captured["messages"] = body.messages
+        return {"task_id": "task-resp-test", "account_id": "acct", "content": "vision ok"}
+
+    monkeypatch.setattr(server.browser_kernel, "chat_completion", fake_chat_completion)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "model": "grok-vision",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "what is this?"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,aGVsbG8=",
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output_text"] == "vision ok"
+    assert captured["messages"][0].content[1]["image_url"].startswith("data:image/png")
+
+
 def test_image_b64_is_saved_to_public_file(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
 
@@ -120,6 +165,32 @@ def test_image_b64_is_saved_to_public_file(monkeypatch, tmp_path):
     file_response = client.get(file_path)
     assert file_response.status_code == 200
     assert file_response.content == b"hello"
+
+
+def test_image_edit_multipart_upload_is_normalized(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    server = _fresh_server(monkeypatch, tmp_path)
+    captured = {}
+
+    async def fake_image_generation(body, _account_id=None):
+        captured["image"] = body.image
+        captured["prompt"] = body.prompt
+        return [{"b64_json": "aGVsbG8=", "media_type": "image/png"}]
+
+    monkeypatch.setattr(server.browser_kernel, "image_generation", fake_image_generation)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/images/edits",
+        headers={"Authorization": "Bearer test-key"},
+        data={"model": "grok-imagine-edit", "prompt": "make it cinematic"},
+        files={"image": ("ref.png", b"hello", "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert captured["prompt"] == "make it cinematic"
+    assert captured["image"].startswith("data:image/png;base64,")
 
 
 def test_video_b64_is_saved_to_public_file(monkeypatch, tmp_path):
@@ -151,3 +222,32 @@ def test_video_b64_is_saved_to_public_file(monkeypatch, tmp_path):
     file_response = client.get(file_path)
     assert file_response.status_code == 200
     assert file_response.content == b"video"
+
+
+def test_video_generation_multipart_reference(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    server = _fresh_server(monkeypatch, tmp_path)
+    captured = {}
+
+    async def fake_video_generation(body, _account_id=None):
+        captured["image"] = body.image
+        captured["duration"] = body.duration
+        return {
+            "status": "completed",
+            "videos": [{"b64_json": "dmlkZW8=", "media_type": "video/mp4"}],
+        }
+
+    monkeypatch.setattr(server.browser_kernel, "video_generation", fake_video_generation)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/videos",
+        headers={"Authorization": "Bearer test-key"},
+        data={"model": "grok-video", "prompt": "animate this", "duration": "6"},
+        files={"image": ("ref.png", b"hello", "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert captured["duration"] == 6
+    assert captured["image"].startswith("data:image/png;base64,")
