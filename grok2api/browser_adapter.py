@@ -885,10 +885,8 @@ class GrokBrowserAdapter:
                     and int(item.get("width") or 0) >= 512
                     and int(item.get("height") or 0) >= 512
                 ]
-                if preferred:
-                    return preferred
-                if first_seen_at and time.monotonic() - first_seen_at >= 25:
-                    return rows
+                if first_seen_at and time.monotonic() - first_seen_at >= 45:
+                    return preferred or rows
         return best_rows
 
     async def _url_to_b64(self, url: str, *, default_media_type: str) -> dict[str, str]:
