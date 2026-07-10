@@ -468,6 +468,8 @@ class GrokBrowserAdapter:
         url = self.page.url.lower()
         if "x.com/i/flow/login" in url or "/login" in url or "/signin" in url:
             return True
+        if await self._prompt_input() is not None:
+            return False
         text = (await self._body_text()).lower()
         markers = (
             "log in",
