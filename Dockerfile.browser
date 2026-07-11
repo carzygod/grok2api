@@ -29,7 +29,8 @@ RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list.d/ubuntu.sources ]; th
       websockify \
       x11vnc \
       xvfb \
-    && if apt-cache show chromium-sandbox >/dev/null 2>&1; then \
+    && chromium_sandbox_candidate="$(apt-cache policy chromium-sandbox | awk '/Candidate:/ {print $2; exit}')" \
+    && if [ -n "$chromium_sandbox_candidate" ] && [ "$chromium_sandbox_candidate" != "(none)" ]; then \
       apt-get install -y --no-install-recommends chromium-sandbox; \
     fi \
     && rm -rf /var/lib/apt/lists/*
