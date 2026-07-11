@@ -70,9 +70,35 @@ def test_admin_page_is_public_shell_but_api_requires_admin_key(monkeypatch, tmp_
     server = _fresh_server(monkeypatch, tmp_path)
     client = TestClient(server.app)
 
-    assert client.get("/admin").status_code == 200
+    admin_page = client.get("/admin")
+    assert admin_page.status_code == 200
+    assert "API Access" in admin_page.text
     assert client.get("/admin/api/accounts").status_code == 401
     assert client.get("/admin/api/accounts", headers={"Authorization": "Bearer admin-key"}).status_code == 200
+    capabilities = client.get("/admin/api/capabilities", headers={"Authorization": "Bearer admin-key"})
+    assert capabilities.status_code == 200
+    assert capabilities.json()["auth"]["api_key"] == "test-key"
+
+
+def test_stop_browser_deletes_profile_and_resets_account(monkeypatch, tmp_path):
+    server = _fresh_server(monkeypatch, tmp_path)
+    account = server.store.create_account("main", "main", "")
+    server.store.update_account(account.id, status="ready", capabilities=["chat", "image"], last_error="")
+    profile_dir = tmp_path / "data" / "profiles" / account.id
+    profile_dir.mkdir(parents=True)
+    profile_file = profile_dir / "Default" / "Preferences"
+    profile_file.parent.mkdir()
+    profile_file.write_text("profile-data")
+
+    result = server.browser_kernel.stop_browser(account.id)
+
+    assert result["profile_deleted"] is True
+    assert result["profile_bytes_deleted"] == len("profile-data")
+    assert not profile_dir.exists()
+    updated = server.store.get(account.id)
+    assert updated is not None
+    assert updated.status == "new"
+    assert updated.capabilities == []
 
 
 def test_chat_stream_returns_sse_chunks(monkeypatch, tmp_path):

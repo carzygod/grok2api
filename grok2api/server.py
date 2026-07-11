@@ -133,6 +133,10 @@ def create_app() -> FastAPI:
                 "base_url": settings.browser_base_url,
                 "docker_socket_required": settings.browser_mode == "docker-novnc",
             },
+            "auth": {
+                "api_key": settings.effective_api_key,
+                "authorization_header": f"Bearer {settings.effective_api_key}",
+            },
             "adapters": {
                 "text": {
                     "status": "browser_cdp_adapter",
@@ -382,6 +386,8 @@ def create_app() -> FastAPI:
     .badge.warn { background:#3a2e12; color:#f5d889; }
     pre { white-space:pre-wrap; overflow:auto; border:1px solid #26364b; border-radius:14px; background:#08101a; color:#cfe0f4; padding:14px; min-height:80px; }
     a { color:#7bd7ff; }
+    .key-grid { display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
     @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } header { align-items:flex-start; flex-direction:column; } }
     @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } main { padding:18px; } }
   </style>
@@ -401,6 +407,16 @@ def create_app() -> FastAPI:
       <div class="panel"><h2>Text</h2><p id="textStatus" class="muted">Loading</p></div>
       <div class="panel"><h2>Image</h2><p id="imageStatus" class="muted">Loading</p></div>
       <div class="panel"><h2>Video</h2><p id="videoStatus" class="muted">Loading</p></div>
+    </section>
+
+    <section class="panel stack" style="margin-bottom:16px;">
+      <h2>API Access</h2>
+      <p class="muted">Use this key for OpenAI-compatible endpoints such as <span class="mono">/v1/responses</span>, <span class="mono">/v1/images/generations</span>, and <span class="mono">/v1/videos</span>.</p>
+      <div class="key-grid">
+        <input id="apiKey" class="mono" readonly placeholder="Loading API key" />
+        <button id="copyApiKey" class="secondary">Copy</button>
+      </div>
+      <pre id="apiExample" class="mono"></pre>
     </section>
 
     <section class="panel stack" style="margin-bottom:16px;">
@@ -460,6 +476,11 @@ def create_app() -> FastAPI:
         document.getElementById("textStatus").textContent = caps.adapters.text.status;
         document.getElementById("imageStatus").textContent = caps.adapters.image.status;
         document.getElementById("videoStatus").textContent = caps.adapters.video.status;
+        const apiKey = caps.auth && caps.auth.api_key ? caps.auth.api_key : "";
+        document.getElementById("apiKey").value = apiKey;
+        document.getElementById("apiExample").textContent = apiKey
+          ? `curl -H "Authorization: Bearer ${apiKey}" ${location.origin}/v1/models`
+          : "API key is not configured.";
         const data = await api("/admin/api/accounts");
         const root = document.getElementById("accounts");
         root.innerHTML = "";
@@ -476,12 +497,13 @@ def create_app() -> FastAPI:
               ${badge(account.status)}
             </div>
             <div class="muted">cookies: ${account.cookie_count} / port: ${account.browser_port || "-"} / debug: ${account.browser_debug_port || "-"}</div>
+            <div class="muted">profile: ${account.user_data_dir}</div>
             <div class="row" style="margin-top:12px;">
               <button data-action="login" data-id="${account.id}">Open Login Browser</button>
               <button class="secondary" data-action="status" data-id="${account.id}">Browser Status</button>
               <button class="secondary" data-action="validate" data-id="${account.id}">Validate</button>
               <button class="secondary" data-action="recreate" data-id="${account.id}">Recreate Browser</button>
-              <button class="danger" data-action="stop" data-id="${account.id}">Stop Browser</button>
+              <button class="danger" data-action="stop" data-id="${account.id}">Close + Delete Profile</button>
             </div>
             ${account.last_error ? `<p class="muted" style="margin-top:10px;">${account.last_error}</p>` : ""}
           `;
@@ -512,6 +534,7 @@ def create_app() -> FastAPI:
           result = await api(`/admin/api/accounts/${id}/browser/recreate`, {method:"POST"});
           show(result);
         } else if (target.dataset.action === "stop") {
+          if (!window.confirm(`Close browser container and delete profile for ${id}? This removes the saved Grok login state.`)) return;
           result = await api(`/admin/api/accounts/${id}/browser/stop`, {method:"POST"});
           show(result);
         }
@@ -533,6 +556,19 @@ def create_app() -> FastAPI:
       } catch (err) { show(err); }
     };
     document.getElementById("capBtn").onclick = async () => show(await api("/admin/api/capabilities"));
+    document.getElementById("copyApiKey").onclick = async () => {
+      const value = document.getElementById("apiKey").value;
+      if (!value) return;
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const input = document.getElementById("apiKey");
+        input.focus();
+        input.select();
+        document.execCommand("copy");
+      }
+      show("API key copied.");
+    };
     document.getElementById("refreshBtn").onclick = load;
     load();
   </script>

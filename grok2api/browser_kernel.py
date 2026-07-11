@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -123,11 +124,15 @@ class BrowserKernel:
         account = self.store.get(account_id)
         if not account:
             raise KeyError(f"Account not found: {account_id}")
+        profile_path = Path(account.user_data_dir)
         base = {
             "account_id": account.id,
             "mode": settings.browser_mode,
             "image": settings.browser_image,
             "container": account.browser_container,
+            "profile_dir": str(profile_path),
+            "profile_exists": profile_path.exists(),
+            "profile_bytes": self._dir_size(profile_path),
             "browser_url": self.browser_public_url(account),
             "browser_password": account.browser_password,
             "debug_url": self.browser_debug_url(account),
@@ -228,16 +233,89 @@ class BrowserKernel:
         account = self.store.get(account_id)
         if not account:
             raise KeyError(f"Account not found: {account_id}")
+        result: dict[str, Any] = {
+            "account_id": account.id,
+            "container": account.browser_container,
+            "container_removed": False,
+            "profile_deleted": False,
+            "profile_dir": account.user_data_dir,
+            "profile_bytes_deleted": 0,
+            "profile_error": "",
+        }
         if settings.browser_mode == "docker-novnc":
             try:
                 client = self._docker_client()
-                container = client.containers.get(account.browser_container)
-                container.stop(timeout=10)
+                try:
+                    container = client.containers.get(account.browser_container)
+                    container.remove(force=True)
+                    result["container_removed"] = True
+                except NotFound:
+                    result["container_removed"] = True
             except NotFound:
                 pass
             except DockerException as exc:
                 raise RuntimeError(f"docker_error:{exc}") from exc
-        return self.browser_status(account_id)
+        profile_result = self._delete_profile_dir(account)
+        result.update(profile_result)
+        self.store.update_account(
+            account.id,
+            status="new",
+            capabilities=[],
+            last_validated_at=None,
+            last_error="Browser closed and profile deleted.",
+        )
+        result["status"] = self.browser_status(account_id)
+        return result
+
+    @staticmethod
+    def _dir_size(path: Path) -> int:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+        total = 0
+        try:
+            for item in path.rglob("*"):
+                try:
+                    if item.is_file():
+                        total += item.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            return total
+        return total
+
+    def _delete_profile_dir(self, account: Account) -> dict[str, Any]:
+        target = Path(account.user_data_dir)
+        base = settings.profiles_dir
+        result: dict[str, Any] = {
+            "profile_deleted": False,
+            "profile_dir": str(target),
+            "profile_bytes_deleted": 0,
+            "profile_error": "",
+        }
+        try:
+            resolved_base = base.resolve(strict=False)
+            resolved_target = target.resolve(strict=False)
+            expected_target = (resolved_base / account.id).resolve(strict=False)
+            if resolved_target != expected_target:
+                result["profile_error"] = "profile_path_outside_account_dir"
+                return result
+            if not target.exists():
+                result["profile_deleted"] = True
+                return result
+            result["profile_bytes_deleted"] = self._dir_size(target)
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            result["profile_deleted"] = True
+        except OSError as exc:
+            result["profile_error"] = str(exc)
+        return result
 
     def create_interactive_login_session(self, account_id: str) -> dict:
         account = self.store.get(account_id)
