@@ -21,6 +21,40 @@ APP_URL = "https://grok.com/"
 IMAGES_URL = "https://grok.com/imagine"
 MAX_INPUT_MEDIA_BYTES = 80 * 1024 * 1024
 MAX_OUTPUT_MEDIA_BYTES = 250 * 1024 * 1024
+GENERATION_QUOTA_MARKERS = (
+    "daily limit",
+    "usage limit",
+    "generation limit",
+    "image limit",
+    "video limit",
+    "you've reached your limit",
+    "you have reached your limit",
+    "you reached your limit",
+    "quota exceeded",
+    "out of generations",
+    "no generations left",
+)
+GENERATION_RATE_MARKERS = (
+    "rate limit",
+    "rate-limited",
+    "too many requests",
+    "try again later",
+    "try again in",
+    "come back later",
+)
+GENERATION_UNAVAILABLE_MARKERS = (
+    "not available in your region",
+    "not currently available",
+    "temporarily unavailable",
+    "available to premium",
+    "upgrade to",
+    "subscribe to",
+)
+GENERATION_BLOCKED_MARKERS = (
+    "blocked due to abusive traffic patterns",
+    "suspicious activity",
+    "automated requests",
+)
 
 
 class BrowserAdapterError(RuntimeError):
@@ -242,6 +276,7 @@ class GrokBrowserAdapter:
         await self._settle(2)
         await self._require_logged_in()
         await self._select_imagine_mode("image")
+        await self._raise_generation_blocker("image")
         upload_files, prompt_refs = await self._materialize_input_media(images, prefix="image-input")
         attached = await self._attach_input_files(upload_files)
         if upload_files and not attached:
@@ -258,6 +293,8 @@ class GrokBrowserAdapter:
         )
         seen = await self._image_sources()
         await self._submit_prompt(final_prompt)
+        await self._settle(2)
+        await self._raise_generation_blocker("image")
         images = await self._wait_for_new_images(seen, timeout_s=timeout_s)
         if not images:
             raise BrowserAdapterError(
@@ -293,6 +330,7 @@ class GrokBrowserAdapter:
         await self._settle(2)
         await self._require_logged_in()
         await self._select_imagine_mode("video")
+        await self._raise_generation_blocker("video")
         upload_files, prompt_refs = await self._materialize_input_media(None, prefix="video-input")
         seen = await self._video_sources()
         attached = await self._attach_input_files(upload_files)
@@ -303,6 +341,8 @@ class GrokBrowserAdapter:
                 details={"count": len(upload_files)},
             )
         await self._submit_prompt(self._generation_prompt(prompt, references=prompt_refs))
+        await self._settle(2)
+        await self._raise_generation_blocker("video")
         videos = await self._wait_for_new_videos(seen, timeout_s=timeout_s)
         if not videos:
             raise BrowserAdapterError(
@@ -351,6 +391,7 @@ class GrokBrowserAdapter:
         await self._settle(2)
         await self._require_logged_in()
         await self._select_imagine_mode("video")
+        await self._raise_generation_blocker("video")
         upload_files, prompt_refs = await self._materialize_input_media(images, prefix="video-input")
         attached = await self._attach_input_files(upload_files)
         if upload_files and not attached:
@@ -368,6 +409,8 @@ class GrokBrowserAdapter:
             references=prompt_refs,
         )
         await self._submit_prompt(final_prompt)
+        await self._settle(2)
+        await self._raise_generation_blocker("video")
         videos = await self._wait_for_new_videos(seen, timeout_s=timeout_s)
         if not videos:
             raise BrowserAdapterError(
@@ -516,6 +559,46 @@ class GrokBrowserAdapter:
                 status_code=409,
                 details={"page_url": self.page.url},
             )
+
+    async def _generation_blocker_error(self, kind: str) -> BrowserAdapterError | None:
+        text = (await self._body_text()).lower()
+        if not text:
+            return None
+        details = {"kind": kind, "page_url": self.page.url, "text_excerpt": text[:600]}
+        if any(marker in text for marker in GENERATION_QUOTA_MARKERS):
+            return BrowserAdapterError(
+                "provider_quota_exceeded",
+                f"Grok reported that the {kind} generation quota is exhausted for this account.",
+                status_code=429,
+                details=details,
+            )
+        if any(marker in text for marker in GENERATION_RATE_MARKERS):
+            return BrowserAdapterError(
+                "provider_rate_limited",
+                f"Grok is rate-limiting {kind} generation for this account.",
+                status_code=429,
+                details=details,
+            )
+        if any(marker in text for marker in GENERATION_UNAVAILABLE_MARKERS):
+            return BrowserAdapterError(
+                "provider_generation_unavailable",
+                f"Grok reported that {kind} generation is unavailable for this account.",
+                status_code=409,
+                details=details,
+            )
+        if any(marker in text for marker in GENERATION_BLOCKED_MARKERS):
+            return BrowserAdapterError(
+                "provider_generation_blocked",
+                f"Grok blocked {kind} generation for this account.",
+                status_code=429,
+                details=details,
+            )
+        return None
+
+    async def _raise_generation_blocker(self, kind: str) -> None:
+        error = await self._generation_blocker_error(kind)
+        if error is not None:
+            raise error
 
     async def _video_capability_hint(self) -> bool:
         text = (await self._body_text()).lower()
@@ -893,6 +976,7 @@ class GrokBrowserAdapter:
         best_rows: list[dict[str, str]] = []
         while time.monotonic() < deadline:
             await asyncio.sleep(4)
+            await self._raise_generation_blocker("image")
             rows = [
                 item
                 for item in await self._media_sources("image")
@@ -1017,6 +1101,7 @@ class GrokBrowserAdapter:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             await asyncio.sleep(5)
+            await self._raise_generation_blocker("video")
             rows = [
                 item.get("url", "")
                 for item in await self._media_sources("video")

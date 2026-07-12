@@ -15,6 +15,8 @@ def _fresh_server(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK2API_HOST_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("GROK2API_API_KEY", "test-key")
     monkeypatch.setenv("GROK2API_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("GROK2API_IMAGE_DAILY_QUOTA", "100")
+    monkeypatch.setenv("GROK2API_VIDEO_DAILY_QUOTA", "20")
     for name in list(sys.modules):
         if name == "grok2api" or name.startswith("grok2api."):
             sys.modules.pop(name)
@@ -277,3 +279,80 @@ def test_video_generation_multipart_reference(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert captured["duration"] == 6
     assert captured["image"].startswith("data:image/png;base64,")
+
+
+def test_admin_quotas_report_image_and_video_defaults(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    server = _fresh_server(monkeypatch, tmp_path)
+    account = server.store.create_account("main", "main", "")
+    server.store.update_account(account.id, status="ready", capabilities=["image", "video"], last_error="")
+    client = TestClient(server.app)
+
+    response = client.get("/admin/api/quotas", headers={"Authorization": "Bearer admin-key"})
+
+    assert response.status_code == 200
+    quotas = response.json()["quotas"]
+    assert {item["kind"] for item in quotas} == {"image", "video"}
+    assert {item["account_id"] for item in quotas} == {"main"}
+    assert {item["remaining_units"] for item in quotas} == {100, 20}
+
+
+def test_image_generation_returns_429_when_local_quota_is_exhausted(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    server = _fresh_server(monkeypatch, tmp_path)
+    account = server.store.create_account("main", "main", "")
+    server.store.update_account(account.id, status="ready", capabilities=["image"], last_error="")
+    server.store.update_generation_quota(account.id, "image", limit_units=0)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/images/generations",
+        headers={"Authorization": "Bearer test-key"},
+        json={"model": "grok-imagine", "prompt": "tiny test image"},
+    )
+
+    assert response.status_code == 429
+    assert int(response.headers["retry-after"]) >= 0
+    assert response.json()["detail"]["error"] == "generation_quota_exhausted"
+
+
+def test_image_generation_switches_account_after_provider_quota_error(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    server = _fresh_server(monkeypatch, tmp_path)
+    account_a = server.store.create_account("account a", "account-a", "")
+    account_b = server.store.create_account("account b", "account-b", "")
+    for account in (account_a, account_b):
+        server.store.update_account(account.id, status="ready", capabilities=["image"], last_error="")
+    calls = []
+
+    async def fake_run_once(account, _body):
+        calls.append(account.id)
+        if account.id == "account-a":
+            raise server.BrowserAdapterError(
+                "provider_quota_exceeded",
+                "image limit reached",
+                429,
+            )
+        return {"data": [{"b64_json": "aGVsbG8=", "media_type": "image/png"}]}
+
+    monkeypatch.setattr(server.browser_kernel, "_run_image_generation_once", fake_run_once)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/images/generations",
+        headers={"Authorization": "Bearer test-key"},
+        json={"model": "grok-imagine", "prompt": "tiny test image"},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["account-a", "account-b"]
+    quotas = {
+        (item["account_id"], item["kind"]): item
+        for item in server.store.list_generation_quotas()
+    }
+    assert quotas[("account-a", "image")]["cooldown_active"] is True
+    assert quotas[("account-a", "image")]["used_units"] == 0
+    assert quotas[("account-b", "image")]["used_units"] == 1

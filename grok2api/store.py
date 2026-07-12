@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,12 @@ from .models import Account, TaskRecord
 
 def _now() -> int:
     return int(time.time())
+
+
+def _next_daily_reset(now: int | None = None) -> int:
+    current = datetime.fromtimestamp(now or _now())
+    reset = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(reset.timestamp())
 
 
 def _safe_id(value: str) -> str:
@@ -117,6 +124,41 @@ class AccountStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_tasks_kind ON grok_tasks(kind)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_tasks_status ON grok_tasks(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_tasks_created ON grok_tasks(created_at)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS grok_account_quotas (
+                    account_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    window TEXT NOT NULL DEFAULT 'day',
+                    limit_units INTEGER NOT NULL,
+                    used_units INTEGER NOT NULL DEFAULT 0,
+                    reserved_units INTEGER NOT NULL DEFAULT 0,
+                    reset_at INTEGER NOT NULL,
+                    cooldown_until INTEGER,
+                    cooldown_reason TEXT NOT NULL DEFAULT '',
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, kind, window)
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_account_quotas_kind ON grok_account_quotas(kind)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_account_quotas_reset ON grok_account_quotas(reset_at)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS grok_usage_events (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    units INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_usage_events_task ON grok_usage_events(task_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_grok_usage_events_account ON grok_usage_events(account_id)")
 
     def create_account(self, name: str = "", account_id: str = "", cookie_header: str = "") -> Account:
         raw_id = _safe_id(account_id or name)
@@ -341,6 +383,245 @@ class AccountStore:
                 account["last_seen"] = last_seen
         return result
 
+    def _default_quota_limit(self, kind: str) -> int:
+        if kind == "video":
+            return max(0, int(settings.video_daily_quota))
+        return max(0, int(settings.image_daily_quota))
+
+    def _quota_row(self, conn: sqlite3.Connection, account_id: str, kind: str, *, now: int | None = None) -> sqlite3.Row:
+        current = now or _now()
+        row = conn.execute(
+            """
+            SELECT * FROM grok_account_quotas
+            WHERE account_id = ? AND kind = ? AND window = 'day'
+            """,
+            (account_id, kind),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO grok_account_quotas (
+                    account_id, kind, window, limit_units, used_units, reserved_units,
+                    reset_at, cooldown_until, cooldown_reason, updated_at
+                ) VALUES (?, ?, 'day', ?, 0, 0, ?, NULL, '', ?)
+                """,
+                (account_id, kind, self._default_quota_limit(kind), _next_daily_reset(current), current),
+            )
+        elif int(row["reset_at"] or 0) <= current:
+            conn.execute(
+                """
+                UPDATE grok_account_quotas
+                SET used_units = 0,
+                    reserved_units = 0,
+                    reset_at = ?,
+                    updated_at = ?
+                WHERE account_id = ? AND kind = ? AND window = 'day'
+                """,
+                (_next_daily_reset(current), current, account_id, kind),
+            )
+        row = conn.execute(
+            """
+            SELECT * FROM grok_account_quotas
+            WHERE account_id = ? AND kind = ? AND window = 'day'
+            """,
+            (account_id, kind),
+        ).fetchone()
+        if row is None:  # pragma: no cover - insert/select above should guarantee a row.
+            raise RuntimeError("quota_row_missing")
+        return row
+
+    def quota_status(self, account_id: str, kind: str) -> dict[str, Any]:
+        with self._lock, self._connect() as conn:
+            row = self._quota_row(conn, account_id, kind)
+            return self._row_to_quota(row)
+
+    def list_generation_quotas(self, account_id: str | None = None) -> list[dict[str, Any]]:
+        accounts = [self.get(account_id)] if account_id else self.list_accounts()
+        result: list[dict[str, Any]] = []
+        for account in accounts:
+            if account is None:
+                continue
+            for kind in ("image", "video"):
+                quota = self.quota_status(account.id, kind)
+                quota["account_name"] = account.name
+                quota["account_status"] = account.status
+                result.append(quota)
+        return result
+
+    def reserve_generation_quota(self, account_id: str, kind: str, units: int, task_id: str) -> dict[str, Any]:
+        units = max(1, int(units or 1))
+        now = _now()
+        with self._lock, self._connect() as conn:
+            row = self._quota_row(conn, account_id, kind, now=now)
+            quota = self._row_to_quota(row)
+            cooldown_until = int(quota.get("cooldown_until") or 0)
+            if cooldown_until > now:
+                return {
+                    "ok": False,
+                    "reason": "cooldown",
+                    "retry_after": cooldown_until - now,
+                    "quota": quota,
+                }
+            if quota["limit_units"] >= 0 and units > quota["remaining_units"]:
+                return {
+                    "ok": False,
+                    "reason": "quota_exhausted",
+                    "retry_after": max(0, int(quota["reset_at"]) - now),
+                    "quota": quota,
+                }
+            reservation_id = "quota-" + uuid.uuid4().hex
+            conn.execute(
+                """
+                UPDATE grok_account_quotas
+                SET reserved_units = reserved_units + ?,
+                    updated_at = ?
+                WHERE account_id = ? AND kind = ? AND window = 'day'
+                """,
+                (units, now, account_id, kind),
+            )
+            conn.execute(
+                """
+                INSERT INTO grok_usage_events (
+                    id, task_id, account_id, kind, units, status, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'reserved', '', ?)
+                """,
+                (reservation_id, task_id, account_id, kind, units, now),
+            )
+            row = self._quota_row(conn, account_id, kind, now=now)
+            return {
+                "ok": True,
+                "reservation_id": reservation_id,
+                "task_id": task_id,
+                "account_id": account_id,
+                "kind": kind,
+                "units": units,
+                "quota": self._row_to_quota(row),
+            }
+
+    def commit_generation_quota(self, reservation: dict[str, Any], reason: str = "completed") -> dict[str, Any]:
+        return self._finish_generation_quota(reservation, status="committed", reason=reason)
+
+    def release_generation_quota(self, reservation: dict[str, Any], reason: str = "released") -> dict[str, Any]:
+        return self._finish_generation_quota(reservation, status="released", reason=reason)
+
+    def _finish_generation_quota(self, reservation: dict[str, Any], *, status: str, reason: str) -> dict[str, Any]:
+        account_id = str(reservation.get("account_id") or "")
+        kind = str(reservation.get("kind") or "")
+        task_id = str(reservation.get("task_id") or "")
+        units = max(1, int(reservation.get("units") or 1))
+        if not account_id or not kind:
+            return {}
+        now = _now()
+        with self._lock, self._connect() as conn:
+            if status == "committed":
+                conn.execute(
+                    """
+                    UPDATE grok_account_quotas
+                    SET used_units = used_units + ?,
+                        reserved_units = MAX(0, reserved_units - ?),
+                        updated_at = ?
+                    WHERE account_id = ? AND kind = ? AND window = 'day'
+                    """,
+                    (units, units, now, account_id, kind),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE grok_account_quotas
+                    SET reserved_units = MAX(0, reserved_units - ?),
+                        updated_at = ?
+                    WHERE account_id = ? AND kind = ? AND window = 'day'
+                    """,
+                    (units, now, account_id, kind),
+                )
+            conn.execute(
+                """
+                INSERT INTO grok_usage_events (
+                    id, task_id, account_id, kind, units, status, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("quota-" + uuid.uuid4().hex, task_id, account_id, kind, units, status, reason, now),
+            )
+            row = self._quota_row(conn, account_id, kind, now=now)
+            return self._row_to_quota(row)
+
+    def mark_generation_cooldown(
+        self,
+        account_id: str,
+        kind: str,
+        *,
+        reason: str,
+        seconds: int,
+    ) -> dict[str, Any]:
+        now = _now()
+        until = now + max(60, int(seconds or 60))
+        with self._lock, self._connect() as conn:
+            self._quota_row(conn, account_id, kind, now=now)
+            conn.execute(
+                """
+                UPDATE grok_account_quotas
+                SET cooldown_until = ?,
+                    cooldown_reason = ?,
+                    updated_at = ?
+                WHERE account_id = ? AND kind = ? AND window = 'day'
+                """,
+                (until, reason[:240], now, account_id, kind),
+            )
+            row = self._quota_row(conn, account_id, kind, now=now)
+            return self._row_to_quota(row)
+
+    def update_generation_quota(
+        self,
+        account_id: str,
+        kind: str,
+        *,
+        limit_units: int | None = None,
+        used_units: int | None = None,
+        reserved_units: int | None = None,
+        cooldown_until: int | None = None,
+        cooldown_reason: str | None = None,
+        reset_used: bool = False,
+    ) -> dict[str, Any]:
+        now = _now()
+        with self._lock, self._connect() as conn:
+            self._quota_row(conn, account_id, kind, now=now)
+            assignments: list[str] = []
+            values: list[Any] = []
+            if limit_units is not None:
+                assignments.append("limit_units = ?")
+                values.append(max(0, int(limit_units)))
+            if used_units is not None:
+                assignments.append("used_units = ?")
+                values.append(max(0, int(used_units)))
+            if reserved_units is not None:
+                assignments.append("reserved_units = ?")
+                values.append(max(0, int(reserved_units)))
+            if reset_used:
+                assignments.append("used_units = 0")
+                assignments.append("reserved_units = 0")
+                assignments.append("reset_at = ?")
+                values.append(_next_daily_reset(now))
+            if cooldown_until is not None:
+                assignments.append("cooldown_until = ?")
+                values.append(max(0, int(cooldown_until)) or None)
+            if cooldown_reason is not None:
+                assignments.append("cooldown_reason = ?")
+                values.append(cooldown_reason[:240])
+            if assignments:
+                assignments.append("updated_at = ?")
+                values.append(now)
+                values.extend([account_id, kind])
+                conn.execute(
+                    f"""
+                    UPDATE grok_account_quotas
+                    SET {', '.join(assignments)}
+                    WHERE account_id = ? AND kind = ? AND window = 'day'
+                    """,
+                    values,
+                )
+            row = self._quota_row(conn, account_id, kind, now=now)
+            return self._row_to_quota(row)
+
     def create_login_session(self, account_id: str, token: str, browser_url: str, ttl: int) -> dict[str, Any]:
         now = _now()
         expires_at = now + max(60, ttl)
@@ -404,6 +685,28 @@ class AccountStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
+
+    def _row_to_quota(self, row: sqlite3.Row) -> dict[str, Any]:
+        limit_units = int(row["limit_units"])
+        used_units = int(row["used_units"])
+        reserved_units = int(row["reserved_units"])
+        remaining_units = max(0, limit_units - used_units - reserved_units)
+        cooldown_until = row["cooldown_until"]
+        now = _now()
+        return {
+            "account_id": row["account_id"],
+            "kind": row["kind"],
+            "window": row["window"],
+            "limit_units": limit_units,
+            "used_units": used_units,
+            "reserved_units": reserved_units,
+            "remaining_units": remaining_units,
+            "reset_at": row["reset_at"],
+            "cooldown_until": cooldown_until,
+            "cooldown_reason": row["cooldown_reason"] or "",
+            "cooldown_active": bool(cooldown_until and int(cooldown_until) > now),
+            "updated_at": row["updated_at"],
+        }
 
     def account_cookies(self, account_id: str) -> dict[str, str]:
         with self._lock, self._connect() as conn:

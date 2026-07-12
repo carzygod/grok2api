@@ -18,6 +18,7 @@ from .models import (
     AccountUpdate,
     ChatCompletionRequest,
     ChatMessage,
+    GenerationQuotaUpdate,
     ImageEditRequest,
     ImageGenerationRequest,
     ImageVariationRequest,
@@ -157,7 +158,11 @@ def create_app() -> FastAPI:
         }
 
     def _adapter_http_error(exc: BrowserAdapterError) -> HTTPException:
-        return HTTPException(status_code=exc.status_code, detail=exc.payload())
+        headers = None
+        retry_after = exc.details.get("retry_after")
+        if retry_after is not None:
+            headers = {"Retry-After": str(max(0, int(retry_after)))}
+        return HTTPException(status_code=exc.status_code, detail=exc.payload(), headers=headers)
 
     def _chat_content(result: str | dict) -> tuple[str, str | None, str | None]:
         if isinstance(result, dict):
@@ -384,6 +389,9 @@ def create_app() -> FastAPI:
     .badge { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; background:#1d2a3b; color:#bfd0e4; font-size:12px; }
     .badge.ready { background:#12392e; color:#8df0c9; }
     .badge.warn { background:#3a2e12; color:#f5d889; }
+    .quota-table { width:100%; border-collapse:collapse; overflow:hidden; }
+    .quota-table th, .quota-table td { border-bottom:1px solid #26364b; padding:9px 8px; text-align:left; font-size:13px; }
+    .quota-table th { color:#98a8bc; font-weight:600; }
     pre { white-space:pre-wrap; overflow:auto; border:1px solid #26364b; border-radius:14px; background:#08101a; color:#cfe0f4; padding:14px; min-height:80px; }
     a { color:#7bd7ff; }
     .key-grid { display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; }
@@ -432,6 +440,11 @@ def create_app() -> FastAPI:
     <section class="panel stack">
       <h2>Accounts</h2>
       <div id="accounts" class="accounts"></div>
+    </section>
+
+    <section class="panel stack" style="margin-top:16px;">
+      <h2>Generation Quotas</h2>
+      <div id="quotas" class="muted">Loading</div>
     </section>
 
     <section class="panel stack" style="margin-top:16px;">
@@ -486,28 +499,52 @@ def create_app() -> FastAPI:
         root.innerHTML = "";
         if (!data.accounts.length) {
           root.innerHTML = '<p class="muted">No account yet.</p>';
-          return;
+        } else {
+          for (const account of data.accounts) {
+            const div = document.createElement("div");
+            div.className = "account";
+            div.innerHTML = `
+              <div class="account-head">
+                <div><strong>${account.name}</strong><div class="muted">${account.id}</div></div>
+                ${badge(account.status)}
+              </div>
+              <div class="muted">cookies: ${account.cookie_count} / port: ${account.browser_port || "-"} / debug: ${account.browser_debug_port || "-"}</div>
+              <div class="muted">profile: ${account.user_data_dir}</div>
+              <div class="row" style="margin-top:12px;">
+                <button data-action="login" data-id="${account.id}">Open Login Browser</button>
+                <button class="secondary" data-action="status" data-id="${account.id}">Browser Status</button>
+                <button class="secondary" data-action="validate" data-id="${account.id}">Validate</button>
+                <button class="secondary" data-action="recreate" data-id="${account.id}">Recreate Browser</button>
+                <button class="danger" data-action="stop" data-id="${account.id}">Close + Delete Profile</button>
+              </div>
+              ${account.last_error ? `<p class="muted" style="margin-top:10px;">${account.last_error}</p>` : ""}
+            `;
+            root.appendChild(div);
+          }
         }
-        for (const account of data.accounts) {
-          const div = document.createElement("div");
-          div.className = "account";
-          div.innerHTML = `
-            <div class="account-head">
-              <div><strong>${account.name}</strong><div class="muted">${account.id}</div></div>
-              ${badge(account.status)}
-            </div>
-            <div class="muted">cookies: ${account.cookie_count} / port: ${account.browser_port || "-"} / debug: ${account.browser_debug_port || "-"}</div>
-            <div class="muted">profile: ${account.user_data_dir}</div>
-            <div class="row" style="margin-top:12px;">
-              <button data-action="login" data-id="${account.id}">Open Login Browser</button>
-              <button class="secondary" data-action="status" data-id="${account.id}">Browser Status</button>
-              <button class="secondary" data-action="validate" data-id="${account.id}">Validate</button>
-              <button class="secondary" data-action="recreate" data-id="${account.id}">Recreate Browser</button>
-              <button class="danger" data-action="stop" data-id="${account.id}">Close + Delete Profile</button>
-            </div>
-            ${account.last_error ? `<p class="muted" style="margin-top:10px;">${account.last_error}</p>` : ""}
+        const quotaData = await api("/admin/api/quotas");
+        const quotaRoot = document.getElementById("quotas");
+        if (!quotaData.quotas.length) {
+          quotaRoot.textContent = "No quota rows yet.";
+        } else {
+          quotaRoot.innerHTML = `
+            <table class="quota-table">
+              <thead><tr><th>Account</th><th>Kind</th><th>Used</th><th>Reserved</th><th>Remaining</th><th>Limit</th><th>Cooldown</th></tr></thead>
+              <tbody>
+                ${quotaData.quotas.map(q => `
+                  <tr>
+                    <td><span class="mono">${q.account_id}</span></td>
+                    <td>${q.kind}</td>
+                    <td>${q.used_units}</td>
+                    <td>${q.reserved_units}</td>
+                    <td>${q.remaining_units}</td>
+                    <td>${q.limit_units}</td>
+                    <td>${q.cooldown_active ? `${q.cooldown_reason || "cooldown"} until ${new Date(q.cooldown_until * 1000).toLocaleString()}` : "-"}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
           `;
-          root.appendChild(div);
         }
       } catch (err) {
         show(err);
@@ -679,6 +716,22 @@ def create_app() -> FastAPI:
     @app.get("/admin/api/metrics", dependencies=[Depends(admin_auth)])
     async def admin_metrics(since: int | None = None):
         return {"accounts": store.account_metrics(since=since)}
+
+    @app.get("/admin/api/quotas", dependencies=[Depends(admin_auth)])
+    async def admin_quotas(account_id: str | None = None):
+        return {"quotas": store.list_generation_quotas(account_id=account_id)}
+
+    @app.patch("/admin/api/accounts/{account_id}/quotas/{kind}", dependencies=[Depends(admin_auth)])
+    async def admin_update_quota(account_id: str, kind: str, body: GenerationQuotaUpdate):
+        if kind not in {"image", "video"}:
+            raise HTTPException(status_code=400, detail="invalid_quota_kind")
+        if not store.get(account_id):
+            raise HTTPException(status_code=404, detail="account_not_found")
+        return store.update_generation_quota(
+            account_id,
+            kind,
+            **body.model_dump(exclude_unset=True),
+        )
 
     @app.get("/v1/models", dependencies=[Depends(api_auth)])
     async def models():

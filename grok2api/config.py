@@ -46,6 +46,10 @@ class Settings:
     headless: bool = _bool_env("GROK2API_HEADLESS", True)
     capture_traces: bool = _bool_env("GROK2API_CAPTURE_TRACES", True)
     access_log: bool = _bool_env("GROK2API_ACCESS_LOG", False)
+    image_daily_quota: int = _int_env("GROK2API_IMAGE_DAILY_QUOTA", 100)
+    video_daily_quota: int = _int_env("GROK2API_VIDEO_DAILY_QUOTA", 20)
+    generation_quota_cooldown_seconds: int = _int_env("GROK2API_GENERATION_QUOTA_COOLDOWN_SECONDS", 6 * 60 * 60)
+    generation_failure_cooldown_seconds: int = _int_env("GROK2API_GENERATION_FAILURE_COOLDOWN_SECONDS", 30 * 60)
 
     @property
     def db_path(self) -> Path:

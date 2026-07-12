@@ -28,6 +28,15 @@ class AccountUpdate(BaseModel):
     cookie_header: str | None = None
 
 
+class GenerationQuotaUpdate(BaseModel):
+    limit_units: int | None = Field(default=None, ge=0)
+    used_units: int | None = Field(default=None, ge=0)
+    reserved_units: int | None = Field(default=None, ge=0)
+    cooldown_until: int | None = Field(default=None, ge=0)
+    cooldown_reason: str | None = Field(default=None, max_length=240)
+    reset_used: bool = False
+
+
 class Account(BaseModel):
     id: str
     name: str

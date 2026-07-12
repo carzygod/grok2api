@@ -128,6 +128,8 @@ GET /admin/api/capabilities
 GET /admin/api/tasks
 GET /admin/api/tasks/{task_id}
 GET /admin/api/metrics
+GET /admin/api/quotas
+PATCH /admin/api/accounts/{account_id}/quotas/{kind}
 ```
 
 Admin API calls should use `Authorization: Bearer <admin-key>`. Query-string `key` remains accepted for compatibility, but the bundled Admin page stores the key in session storage and sends headers to avoid repeating secrets in access logs.
@@ -154,6 +156,17 @@ Request bodies support optional `account_id` so a caller can force a specific Gr
 Image and video request bodies can be JSON with `image` as a data URL, local path,
 or HTTP(S) URL. Image edit, variation, and video endpoints also accept
 `multipart/form-data` with an `image` file field.
+
+## Image/Video Quotas
+
+Image and video generations use a local daily soft quota per Grok account and capability.
+Defaults are `GROK2API_IMAGE_DAILY_QUOTA=100` and `GROK2API_VIDEO_DAILY_QUOTA=20`.
+Quota rows track used, reserved, remaining, reset time, and capability-specific cooldown.
+
+When a ready account reports an upstream generation quota/rate/block/unavailable condition,
+the request releases its local reservation, marks that account/capability in cooldown, and
+tries the next ready account. If all usable accounts are exhausted, the API returns a
+structured error; local quota exhaustion returns HTTP `429` with `Retry-After`.
 
 Image-to-text through chat:
 
@@ -337,6 +350,7 @@ data/
 - Chat streaming is supported through OpenAI-compatible SSE chunks after the browser response is available.
 - Chat and Responses requests can upload OpenAI-style image/video content parts before asking Grok for text.
 - Account validation records detected capabilities, and account rotation considers recent task failures.
+- Image/video generations reserve daily per-account quota before browser automation, commit on success, release on failure, and switch accounts after confirmed upstream generation limits.
 - Browser containers expose CDP through an internal loopback Chrome port plus a container-level TCP proxy.
 - Request fields such as image count, size, video duration, aspect ratio, and reference media are applied as browser prompt constraints and best-effort uploads.
 - Grok Imagine image/video mode selection is attempted before generation, then DOM media extraction scans image/video/source/link/background nodes and fetches protected/blob media in the browser context.

@@ -544,59 +544,13 @@ class BrowserKernel:
             account_id=account_id,
             request=self._safe_request_payload(body.model_dump()),
         )
-        account: Account | None = None
-        try:
-            account = self.pick_ready_account(account_id)
-            self.store.update_task(task.task_id, account_id=account.id, status="running")
-            browser = self.browser_status(account.id)
-            if not browser.get("running"):
-                raise BrowserAdapterError("browser_not_running", "Ready account browser is not running.", 503)
-            debug_url = await self._require_debug_url(browser)
-            async with self._lock_for(account.id):
-                async with GrokBrowserAdapter(account, debug_url) as adapter:
-                    data = await asyncio.wait_for(
-                        adapter.generate_image(
-                            body.prompt,
-                            response_format="b64_json",
-                            n=body.n,
-                            size=body.size,
-                            images=body.image,
-                        ),
-                        timeout=380,
-                    )
-                    await self._writeback_cookies(account.id, adapter)
-            result = {"data": data}
-            self.store.update_task(task.task_id, status="completed", result=result)
-            return {"task_id": task.task_id, "account_id": account.id, **result}
-        except BrowserAdapterError as exc:
-            self.store.update_task(
-                task.task_id,
-                account_id=account.id if account else account_id,
-                status="failed",
-                error=exc.message,
-                result=exc.payload(),
-            )
-            raise
-        except asyncio.TimeoutError as exc:
-            message = "Grok image generation timed out."
-            self.store.update_task(
-                task.task_id,
-                account_id=account.id if account else account_id,
-                status="failed",
-                error=message,
-                result={"error": "adapter_timeout", "message": message},
-            )
-            raise BrowserAdapterError("adapter_timeout", message, 504) from exc
-        except Exception as exc:
-            message = str(exc)
-            self.store.update_task(
-                task.task_id,
-                account_id=account.id if account else account_id,
-                status="failed",
-                error=message,
-                result={"error": "adapter_unexpected_error", "message": message},
-            )
-            raise BrowserAdapterError("adapter_unexpected_error", message) from exc
+        return await self._generation_with_quota(
+            kind="image",
+            task_id=task.task_id,
+            preferred_account_id=account_id,
+            units=max(1, int(body.n or 1)),
+            run_once=lambda account: self._run_image_generation_once(account, body),
+        )
 
     async def video_generation(
         self,
@@ -610,59 +564,272 @@ class BrowserKernel:
             account_id=account_id,
             request=self._safe_request_payload(body.model_dump()),
         )
-        account: Account | None = None
-        try:
-            account = self.pick_ready_account(account_id)
-            self.store.update_task(task.task_id, account_id=account.id, status="running")
-            browser = self.browser_status(account.id)
-            if not browser.get("running"):
-                raise BrowserAdapterError("browser_not_running", "Ready account browser is not running.", 503)
-            debug_url = await self._require_debug_url(browser)
-            async with self._lock_for(account.id):
-                async with GrokBrowserAdapter(account, debug_url) as adapter:
-                    result = await asyncio.wait_for(
-                        adapter.generate_video_with_options(
-                            body.prompt,
-                            duration=body.duration,
-                            aspect_ratio=body.aspect_ratio,
-                            size=body.size,
-                            images=body.image,
-                            timeout_s=720,
-                        ),
-                        timeout=900,
+        return await self._generation_with_quota(
+            kind="video",
+            task_id=task.task_id,
+            preferred_account_id=account_id,
+            units=1,
+            run_once=lambda account: self._run_video_generation_once(account, body),
+        )
+
+    def _generation_capable(self, account: Account, kind: str) -> bool:
+        return not account.capabilities or kind in account.capabilities
+
+    def pick_generation_account(
+        self,
+        kind: str,
+        units: int,
+        *,
+        preferred_account_id: str | None = None,
+        exclude: set[str] | None = None,
+    ) -> Account:
+        exclude = exclude or set()
+        accounts = self.ready_accounts()
+        if preferred_account_id:
+            preferred = self.store.get(preferred_account_id)
+            if not preferred:
+                raise BrowserAdapterError("account_not_found", "Requested account was not found.", 404)
+            if not preferred.enabled:
+                raise BrowserAdapterError("account_disabled", "Requested account is disabled.", 409)
+            if preferred.status != "ready":
+                raise BrowserAdapterError(
+                    "provider_login_required",
+                    "Requested account is not ready. Start the browser, finish Grok login, then validate it.",
+                    409,
+                    {"account_id": preferred.id, "status": preferred.status},
+                )
+            accounts = [preferred] + [account for account in accounts if account.id != preferred.id]
+        if not accounts:
+            raise BrowserAdapterError(
+                "provider_login_required",
+                "No ready Grok Web account is available. Add an account, open the remote browser, log in to Grok, then validate.",
+                409,
+            )
+
+        recent = self.store.account_metrics(since=int(time.time()) - 24 * 60 * 60)
+        accounts.sort(
+            key=lambda item: (
+                0 if item.id == preferred_account_id else 1,
+                recent.get(item.id, {}).get("by_status", {}).get("failed", 0),
+                recent.get(item.id, {}).get("by_status", {}).get("running", 0),
+                item.last_validated_at or item.updated_at or item.created_at,
+            )
+        )
+        blocked: list[dict[str, Any]] = []
+        for account in accounts:
+            if account.id in exclude:
+                continue
+            if not self._generation_capable(account, kind):
+                blocked.append({"account_id": account.id, "reason": "capability_missing"})
+                continue
+            quota = self.store.quota_status(account.id, kind)
+            if quota.get("cooldown_active"):
+                blocked.append({"account_id": account.id, "reason": "cooldown", "quota": quota})
+                continue
+            if int(quota.get("remaining_units") or 0) < units:
+                blocked.append({"account_id": account.id, "reason": "quota_exhausted", "quota": quota})
+                continue
+            return account
+        if exclude and not blocked:
+            blocked = [{"account_id": account.id, "reason": "already_attempted"} for account in accounts]
+        status_code = 429 if any(item["reason"] in {"cooldown", "quota_exhausted"} for item in blocked) else 409
+        code = "generation_quota_exhausted" if status_code == 429 else "provider_generation_unavailable"
+        retry_after_values = []
+        now = int(time.time())
+        for item in blocked:
+            quota = item.get("quota") or {}
+            if item["reason"] == "cooldown" and quota.get("cooldown_until"):
+                retry_after_values.append(max(0, int(quota["cooldown_until"]) - now))
+            if item["reason"] == "quota_exhausted" and quota.get("reset_at"):
+                retry_after_values.append(max(0, int(quota["reset_at"]) - now))
+        details = {"kind": kind, "units": units, "blocked_accounts": blocked}
+        if retry_after_values:
+            details["retry_after"] = min(retry_after_values)
+        raise BrowserAdapterError(
+            code,
+            f"No ready Grok account can currently run {kind} generation.",
+            status_code,
+            details,
+        )
+
+    async def _generation_with_quota(
+        self,
+        *,
+        kind: str,
+        task_id: str,
+        preferred_account_id: str | None,
+        units: int,
+        run_once,
+    ) -> dict[str, Any]:
+        attempted: set[str] = set()
+        last_error: BrowserAdapterError | None = None
+        while True:
+            account: Account | None = None
+            reservation: dict[str, Any] | None = None
+            try:
+                account = self.pick_generation_account(
+                    kind,
+                    units,
+                    preferred_account_id=preferred_account_id,
+                    exclude=attempted,
+                )
+                reservation = self.store.reserve_generation_quota(account.id, kind, units, task_id)
+                if not reservation.get("ok"):
+                    attempted.add(account.id)
+                    continue
+                self.store.update_task(task_id, account_id=account.id, status="running")
+                result = await run_once(account)
+                quota = self.store.commit_generation_quota(reservation, reason="completed")
+                result = {**result, "quota": quota}
+                self.store.update_task(task_id, status="completed", result=result)
+                return {"task_id": task_id, "account_id": account.id, **result}
+            except BrowserAdapterError as exc:
+                if account is None and attempted and exc.code in {
+                    "generation_quota_exhausted",
+                    "provider_generation_unavailable",
+                }:
+                    final_error = last_error or exc
+                    message = f"All available Grok accounts failed {kind} generation."
+                    self.store.update_task(
+                        task_id,
+                        account_id=preferred_account_id,
+                        status="failed",
+                        error=message,
+                        result={
+                            "error": "generation_accounts_exhausted",
+                            "message": message,
+                            "last_error": final_error.payload(),
+                            "attempted_accounts": sorted(attempted),
+                        },
                     )
-                    await self._writeback_cookies(account.id, adapter)
-            self.store.update_task(task.task_id, status="completed", result=result)
-            return {"task_id": task.task_id, "account_id": account.id, **result}
-        except BrowserAdapterError as exc:
-            self.store.update_task(
-                task.task_id,
-                account_id=account.id if account else account_id,
-                status="failed",
-                error=exc.message,
-                result=exc.payload(),
-            )
-            raise
-        except asyncio.TimeoutError as exc:
-            message = "Grok video generation timed out."
-            self.store.update_task(
-                task.task_id,
-                account_id=account.id if account else account_id,
-                status="failed",
-                error=message,
-                result={"error": "adapter_timeout", "message": message},
-            )
-            raise BrowserAdapterError("adapter_timeout", message, 504) from exc
-        except Exception as exc:
-            message = str(exc)
-            self.store.update_task(
-                task.task_id,
-                account_id=account.id if account else account_id,
-                status="failed",
-                error=message,
-                result={"error": "adapter_unexpected_error", "message": message},
-            )
-            raise BrowserAdapterError("adapter_unexpected_error", message) from exc
+                    raise BrowserAdapterError(
+                        "generation_accounts_exhausted",
+                        message,
+                        503,
+                        {
+                            "kind": kind,
+                            "last_error": final_error.payload(),
+                            "attempted_accounts": sorted(attempted),
+                        },
+                    ) from exc
+                last_error = exc
+                if reservation:
+                    self.store.release_generation_quota(reservation, reason=exc.code)
+                if account and self._should_switch_generation_account(exc):
+                    attempted.add(account.id)
+                    self._cooldown_generation_account(account.id, kind, exc)
+                    self.store.update_task(
+                        task_id,
+                        account_id=account.id,
+                        status="retrying",
+                        error=exc.message,
+                        result={
+                            **exc.payload(),
+                            "attempted_accounts": sorted(attempted),
+                        },
+                    )
+                    continue
+                self.store.update_task(
+                    task_id,
+                    account_id=account.id if account else preferred_account_id,
+                    status="failed",
+                    error=exc.message,
+                    result=exc.payload(),
+                )
+                raise
+            except asyncio.TimeoutError as exc:
+                message = f"Grok {kind} generation timed out."
+                adapter_error = BrowserAdapterError("adapter_timeout", message, 504)
+                last_error = adapter_error
+                if reservation:
+                    self.store.release_generation_quota(reservation, reason=adapter_error.code)
+                if account:
+                    attempted.add(account.id)
+                    self._cooldown_generation_account(account.id, kind, adapter_error)
+                    self.store.update_task(
+                        task_id,
+                        account_id=account.id,
+                        status="retrying",
+                        error=message,
+                        result={
+                            "error": adapter_error.code,
+                            "message": message,
+                            "attempted_accounts": sorted(attempted),
+                        },
+                    )
+                    continue
+                raise adapter_error from exc
+            except Exception as exc:
+                message = str(exc)
+                if reservation:
+                    self.store.release_generation_quota(reservation, reason="adapter_unexpected_error")
+                self.store.update_task(
+                    task_id,
+                    account_id=account.id if account else preferred_account_id,
+                    status="failed",
+                    error=message,
+                    result={"error": "adapter_unexpected_error", "message": message},
+                )
+                raise BrowserAdapterError("adapter_unexpected_error", message) from exc
+
+    def _should_switch_generation_account(self, exc: BrowserAdapterError) -> bool:
+        return exc.code in {
+            "provider_quota_exceeded",
+            "provider_rate_limited",
+            "provider_generation_unavailable",
+            "provider_generation_blocked",
+            "image_generation_timeout",
+            "video_generation_timeout",
+            "adapter_timeout",
+            "browser_not_running",
+        }
+
+    def _cooldown_generation_account(self, account_id: str, kind: str, exc: BrowserAdapterError) -> None:
+        seconds = settings.generation_failure_cooldown_seconds
+        if exc.code in {"provider_quota_exceeded", "provider_rate_limited", "provider_generation_blocked"}:
+            seconds = settings.generation_quota_cooldown_seconds
+        self.store.mark_generation_cooldown(account_id, kind, reason=exc.code, seconds=seconds)
+
+    async def _run_image_generation_once(self, account: Account, body: ImageGenerationRequest) -> dict[str, Any]:
+        browser = self.browser_status(account.id)
+        if not browser.get("running"):
+            raise BrowserAdapterError("browser_not_running", "Ready account browser is not running.", 503)
+        debug_url = await self._require_debug_url(browser)
+        async with self._lock_for(account.id):
+            async with GrokBrowserAdapter(account, debug_url) as adapter:
+                data = await asyncio.wait_for(
+                    adapter.generate_image(
+                        body.prompt,
+                        response_format="b64_json",
+                        n=body.n,
+                        size=body.size,
+                        images=body.image,
+                    ),
+                    timeout=380,
+                )
+                await self._writeback_cookies(account.id, adapter)
+        return {"data": data}
+
+    async def _run_video_generation_once(self, account: Account, body: VideoGenerationRequest) -> dict[str, Any]:
+        browser = self.browser_status(account.id)
+        if not browser.get("running"):
+            raise BrowserAdapterError("browser_not_running", "Ready account browser is not running.", 503)
+        debug_url = await self._require_debug_url(browser)
+        async with self._lock_for(account.id):
+            async with GrokBrowserAdapter(account, debug_url) as adapter:
+                result = await asyncio.wait_for(
+                    adapter.generate_video_with_options(
+                        body.prompt,
+                        duration=body.duration,
+                        aspect_ratio=body.aspect_ratio,
+                        size=body.size,
+                        images=body.image,
+                        timeout_s=720,
+                    ),
+                    timeout=900,
+                )
+                await self._writeback_cookies(account.id, adapter)
+        return result
 
     async def _first_reachable_debug_url(self, urls: list[str]) -> dict[str, Any]:
         probes = []
